@@ -1,0 +1,17 @@
+nextflow.trace/v2
+realtime=2225
+%cpu=1983
+cpu_model=Intel(R) Xeon(R) w7-2475X
+rchar=12256481
+wchar=4576747
+syscr=9099
+syscw=14725
+read_bytes=0
+write_bytes=4931584
+%mem=2
+vmem=4547884
+rss=274328
+peak_vmem=4550032
+peak_rss=274328
+vol_ctxt=2
+inv_ctxt=3
