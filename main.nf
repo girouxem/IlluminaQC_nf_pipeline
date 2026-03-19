@@ -8,8 +8,36 @@ nextflow.enable.dsl=2
 * 3. FASTQC (trimmed)
 * 4. MultiQC aggregation
 */
-params.reads  = "data/*_{r1,r2}.fastq.gz"
+params.reads  = "data/*_{r1,R1,r2,R2}.fastq.gz"
 params.outdir = "${baseDir}/results"
+
+process SANITY_CHECK {
+
+    publishDir "${params.outdir}/logs", mode: 'copy'
+
+    input:
+    tuple val(sample_id), path(reads)
+
+    output:
+    path "paircheck_${sample_id}.txt"
+
+    script:
+    """
+    echo "Sample ID: ${sample_id}" > paircheck_${sample_id}.txt
+    read_count=\$(echo ${reads} | wc -w)
+    if [ "\$read_count" -eq 2 ]; then
+        echo "✅  ${sample_id} has two files:" >> paircheck_${sample_id}.txt
+        echo ${reads} | tr ' ' '\\n' >> paircheck_${sample_id}.txt
+    else
+        echo "❌  ${sample_id} has \$read_count files (expected 2)" >> paircheck_${sample_id}.txt
+        echo ${reads} | tr ' ' '\\n' >> paircheck_${sample_id}.txt
+        exit 1
+    fi
+    """
+}
+
+
+
 process FASTQC_RAW {
     tag "$sample_id"
     publishDir "${params.outdir}/fastqc_raw", mode: 'copy'
@@ -74,6 +102,7 @@ process MULTIQC {
 
 workflow {
     raw_pairs = channel.fromFilePairs(params.reads, flat: false)
+    SANITY_CHECK(raw_pairs)
     raw_fastqc     = FASTQC_RAW(raw_pairs)
     trimmed        = FASTP(raw_pairs)
     trimmed_fastqc = FASTQC_TRIMMED(trimmed.trimmed_reads)
