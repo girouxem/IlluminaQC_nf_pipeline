@@ -99,6 +99,45 @@ process MULTIQC {
     """
 }
 
+process RETENTION_TRACK {
+
+    tag "$sample_id"
+    publishDir "${params.outdir}/retention", mode: 'copy'
+
+    /*
+     * Input structure from the join():
+     * [ sample_id , [raw_R1, raw_R2] , trim_R1 , trim_R2 ]
+     */
+    input:
+    tuple val(sample_id), path(raw_pair), path(trim_R1), path(trim_R2)
+
+    output:
+    path "retention_${sample_id}.csv"
+
+    script:
+    """
+    #!/bin/bash
+    set -euo pipefail
+
+    # choose the first mate from the raw pair
+    raw_R1=\$(echo ${raw_pair} | cut -d' ' -f1)
+
+    raw_count=\$(zgrep -c '^@' "\${raw_R1}")
+    trim_count=\$(zgrep -c '^@' "${trim_R1}")
+
+    raw_bases=\$(zcat "\${raw_R1}" | paste - - - - | cut -f2 | tr -d '\\n' | wc -c)
+    trim_bases=\$(zcat "${trim_R1}" | paste - - - - | cut -f2 | tr -d '\\n' | wc -c)
+
+    {
+      echo "sample,reads_before,reads_after,bases_before,bases_after"
+      echo "${sample_id},\${raw_count},\${trim_count},\${raw_bases},\${trim_bases}"
+    } > "retention_${sample_id}.csv"
+    """
+}
+
+
+
+
 
 workflow {
     raw_pairs = channel.fromFilePairs(params.reads, flat: false)
@@ -106,6 +145,7 @@ workflow {
     raw_fastqc     = FASTQC_RAW(raw_pairs)
     trimmed        = FASTP(raw_pairs)
     trimmed_fastqc = FASTQC_TRIMMED(trimmed.trimmed_reads)
+    // Prepare channel: link each sample’s raw+trimmed reads
     // Take only the file paths (ignore sample IDs)
     raw_reports     = raw_fastqc.fastqc_zip.map { id, f -> f }
     trimmed_reports = trimmed.fastp_json.map   { id, f -> f }
@@ -114,5 +154,8 @@ workflow {
     all_reports = raw_reports
         .mix(trimmed_reports, post_reports)
         .collect()
+    retention_input = raw_pairs.join(trimmed.trimmed_reads)
+    RETENTION_TRACK(retention_input)
+
     MULTIQC(all_reports)
 }
