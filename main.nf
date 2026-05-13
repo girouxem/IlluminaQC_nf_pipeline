@@ -11,6 +11,7 @@ nextflow.enable.dsl=2
 params.reads  = "data/*_{r1,R1,r2,R2}.fastq.gz"
 params.outdir = "${baseDir}/results"
 
+
 process SANITY_CHECK {
 
     publishDir "${params.outdir}/logs", mode: 'copy'
@@ -136,6 +137,112 @@ process RETENTION_TRACK {
 }
 
 
+// ---------- 7.  SPAdes Assembly ----------
+process SPADES {
+
+    // directives (in any order among themselves)
+    errorStrategy = 'ignore'
+    maxRetries    = 0
+    cpus          = 8
+    memory        = '16 GB'
+    publishDir "${params.outdir}/assembly", mode: 'copy'
+
+    tag "$sample_id"
+
+    input:
+    tuple val(sample_id), path(R1), path(R2)
+
+    output:
+    tuple val(sample_id), path("contigs.fasta"), emit: contigs
+
+    script:
+    """
+    #!/bin/bash
+    set -euo pipefail
+
+    if [[ ! -s "${R1}" || ! -s "${R2}" ]]; then
+        echo "No trimmed data for ${sample_id}" > ${sample_id}_assembly_skipped.txt
+        exit 0
+    fi
+
+    spades.py \
+        -1 "${R1}" \
+        -2 "${R2}" \
+        --isolate \
+        -o "${sample_id}_spades" \
+        --threads ${task.cpus} \
+        --memory ${task.memory.toMega()/1024} \
+        2>&1 | tee spades_run_${sample_id}.log || true
+
+    if [[ -f "${sample_id}_spades/contigs.fasta" ]]; then
+        cp "${sample_id}_spades/contigs.fasta" .
+    else
+        echo "No contigs generated for ${sample_id}" > ${sample_id}_assembly_failed.txt
+    fi
+    """
+}
+
+
+
+// ---------- 8.  QUAST Assembly QC ----------
+process QUAST {
+
+    tag "$sample_id"
+    publishDir "${params.outdir}/quast", mode: 'copy'
+
+    input:
+    tuple val(sample_id), path(contigs)
+
+    output:
+    path "${sample_id}_quast", emit: quast_reports
+
+    script:
+    """
+    quast.py ${contigs} -o ${sample_id}_quast -t ${task.cpus}
+    """
+}
+
+
+// ---------- 9.  BUSCO Completeness ----------
+// ---------- 9. BUSCO Completeness ----------
+process BUSCO {
+
+    tag "$sample_id"
+    publishDir "${params.outdir}/busco", mode: 'copy'
+    errorStrategy = 'ignore'
+    maxRetries = 0
+
+    input:
+    tuple val(sample_id), path(contigs)
+
+    output:
+    path("${sample_id}_busco") , optional: true , emit: busco_reports
+    path("${sample_id}_busco_failed.txt") , optional: true
+
+    script:
+    """
+    #!/bin/bash
+    set -euo pipefail
+
+    if [[ ! -s "${contigs}" ]]; then
+        echo "No contigs for ${sample_id}" > ${sample_id}_busco_failed.txt
+        exit 0
+    fi
+
+    busco -i ${contigs} \
+          -o ${sample_id}_busco \
+          -l ${params.busco_lineage} \
+          -m genome \
+          --cpu ${task.cpus} \
+          2>&1 | tee busco_run_${sample_id}.log || true
+
+    if [[ ! -d ${sample_id}_busco ]]; then
+        echo "BUSCO failed for ${sample_id}" > ${sample_id}_busco_failed.txt
+    fi
+    """
+}
+
+
 
 
 
@@ -156,6 +263,12 @@ workflow {
         .collect()
     retention_input = raw_pairs.join(trimmed.trimmed_reads)
     RETENTION_TRACK(retention_input)
+
+    // ---------- Assembly workflow ----------
+    trimmed_reads_flat = trimmed.trimmed_reads  // emits [id, R1, R2]
+    assemblies = SPADES(trimmed_reads_flat)
+    quast_out  = QUAST(assemblies.contigs)
+    busco_out  = BUSCO(assemblies.contigs)
 
     MULTIQC(all_reports)
 }
