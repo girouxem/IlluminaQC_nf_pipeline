@@ -48,10 +48,10 @@ process SANITY_CHECK {
     read_count=\$(echo ${reads} | wc -w)
     if [ "\$read_count" -eq 2 ]; then
         echo "OK ${sample_id} has two files:" >> paircheck_${sample_id}.txt
-        echo ${reads} | tr ' '\\n' >> paircheck_${sample_id}.txt
+        echo ${reads} | tr ' ' '\\n' >> paircheck_${sample_id}.txt
     else
         echo "ERROR ${sample_id} has \$read_count files (expected 2)" >> paircheck_${sample_id}.txt
-        echo ${reads} | tr ' '\\n' >> paircheck_${sample_id}.txt
+        echo ${reads} | tr ' ' '\\n' >> paircheck_${sample_id}.txt
         exit 1
     fi
     """
@@ -170,7 +170,7 @@ process SPADES {
         --isolate \\
         -o "${sample_id}_spades" \\
         --threads ${task.cpus} \\
-        --memory ${(task.memory.toMega()/1024).toInt()} \\
+        --memory ${(task.memory.toMega()/1024) as int} \\
         2>&1 | tee spades_run_${sample_id}.log
     if [[ -f "${sample_id}_spades/contigs.fasta" ]]; then
         cp "${sample_id}_spades/contigs.fasta" "${sample_id}_contigs.fasta"
@@ -266,54 +266,51 @@ process BUSCO {
 
 // ---------- Collect BUSCO results into a combined table ----------
 process BUSCO_SUMMARY {
-
     publishDir "${params.outdir}/busco", mode: 'copy'
-    cpus   { params.global_cpus }
-    memory { params.global_memory }
-
     input:
     path busco_dirs
-
     output:
     path "busco_summary.tsv"
-
     script:
     """
     #!/bin/bash
-    set -euo pipefail
-
-    echo -e "sample\\tcomplete_pct\\tsingle_pct\\tduplicated_pct\\tfragmented_pct\\tmissing_pct\\ttotal_genes" > busco_summary.tsv
-
+    printf "sample\\tcomplete_pct\\tsingle_pct\\tduplicated_pct\\tfragmented_pct\\tmissing_pct\\ttotal_genes\\n" > busco_summary.tsv
     for d in ${busco_dirs}; do
         sample=\$(basename \$d | sed 's/_busco//')
-        summary=\$(find \$d -name "short_summary*.txt" | head -1)
-        if [ -z "\$summary" ]; then continue; fi
-
-        # BUSCO 5.x writes the line as:  # C:98.0%[S:97.0%,D:1.0%],F:1.0%,M:1.0%,n:4657
-        # Older 4.x wrote:                  # C:98.0%[S:97.0%,D:1.0%],F:1.0%,M:1.0%,n:4657
-        line=\$(grep -E '^#.*C:.*S:.*D:' "\$summary" | head -1)
-        if [ -z "\$line" ]; then
-            echo -e "\${sample}\\tNA\\tNA\\tNA\\tNA\\tNA\\tNA" >> busco_summary.tsv
+        # Find the summary file - check common locations
+        summary=""
+        if [ -f "\$d/short_summary.txt" ]; then
+            summary="\$d/short_summary.txt"
+        fi
+        if [ -z "\$summary" ]; then
+            summary=\$(ls \$d/run_*/short_summary*.txt 2>/dev/null | head -1)
+        fi
+        if [ -z "\$summary" ]; then
+            summary=\$(ls \$d/*/short_summary*.txt 2>/dev/null | head -1)
+        fi
+        if [ -z "\$summary" ]; then
+            summary=\$(ls \$d/short_summary*.txt 2>/dev/null | head -1)
+        fi
+        if [ -z "\$summary" ]; then
+            printf "%s\\tNO_SUMMARY_FILE\\tNA\\tNA\\tNA\\tNA\\tNA\\n" "\$sample" >> busco_summary.tsv
             continue
         fi
-
-        complete=\$(echo "\$line" | cut -d':' -f2 | cut -d'%' -f1)
-        single=\$(echo "\$line"   | cut -d':' -f3 | cut -d'%' -f1)
-        dup=\$(echo "\$line"      | cut -d':' -f4 | cut -d'%' -f1)
-        frag=\$(echo "\$line"    | cut -d':' -f5 | cut -d'%' -f1)
-        miss=\$(echo "\$line"    | cut -d':' -f6 | cut -d'%' -f1)
-        total=\$(echo "\$line"   | cut -d':' -f7 | cut -d']' -f1)
-
-        echo -e "\${sample}\\t\${complete}\\t\${single}\\t\${dup}\\t\${frag}\\t\${miss}\\t\${total}" >> busco_summary.tsv
+        # Match: C:19.3%[S:18.4%,D:0.9%],F:3.6%,M:77.1%,n:440
+        line=\$(grep -E 'C:[0-9]' "\$summary" 2>/dev/null | head -1)
+        if [ -z "\$line" ]; then
+            printf "%s\\tNO_DATA_LINE\\tNA\\tNA\\tNA\\tNA\\tNA\\n" "\$sample" >> busco_summary.tsv
+            continue
+        fi
+        complete=\$(echo "\$line" | sed -n 's/.*C:\\([0-9.]*\\)%.*/\\1/p')
+        single=\$(echo "\$line"  | sed -n 's/.*S:\\([0-9.]*\\)%.*/\\1/p')
+        dup=\$(echo "\$line"     | sed -n 's/.*D:\\([0-9.]*\\)%.*/\\1/p')
+        frag=\$(echo "\$line"    | sed -n 's/.*F:\\([0-9.]*\\)%.*/\\1/p')
+        miss=\$(echo "\$line"    | sed -n 's/.*M:\\([0-9.]*\\)%.*/\\1/p')
+        total=\$(echo "\$line"   | sed -n 's/.*n:\\([0-9]*\\).*/\\1/p')
+        printf "%s\\t%s\\t%s\\t%s\\t%s\\t%s\\t%s\\n" "\$sample" "\${complete:-PARSE_FAIL}" "\${single:-PARSE_FAIL}" "\${dup:-PARSE_FAIL}" "\${frag:-PARSE_FAIL}" "\${miss:-PARSE_FAIL}" "\${total:-PARSE_FAIL}" >> busco_summary.tsv
     done
-
-    if [ ! -s busco_summary.tsv ]; then
-        echo "No BUSCO summaries found" > busco_summary.tsv
-    fi
     """
-
 }
-
 
 // ---------- Kraken2 classification ----------
 process KRAKEN2 {
@@ -644,6 +641,12 @@ workflow test_BUSCO {
     BUSCO_SUMMARY(busco_collected)
 }
 
+workflow test_BUSCO_SUMMARY{
+    def real_busco_ch = channel.fromPath("${params.outdir}/busco/*_busco", type: 'dir', checkIfExists: true)
+        .collect()
+    // Crucial: gathers all folders into a single list
+    BUSCO_SUMMARY(real_busco_ch)
+}
 /*
  * TEST 9: KRAKEN2 only
  * Run with:
