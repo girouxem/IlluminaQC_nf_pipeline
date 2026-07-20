@@ -342,23 +342,37 @@ process KRAKEN2 {
 process TB_PROFILER {
     tag "$sample_id"
     publishDir "${params.outdir}/tbprofiler", mode: 'copy'
-    errorStrategy 'ignore'
-    maxRetries 0
-    cpus   { params.global_cpus }
-    memory { params.global_memory }
+    errorStrategy = 'ignore'
+    maxRetries = 0
+
     input:
     tuple val(sample_id), path(R1), path(R2)
+
     output:
-    tuple val(sample_id), path("${sample_id}.results.json"), optional: true, emit: tbprofiler_json
+    tuple val(sample_id), path("results/${sample_id}.results.json"), optional: true, emit: tbprofiler_json
+    tuple val(sample_id), path("results/${sample_id}.results.txt"), optional: true, emit: tbprofiler_txt
+    path "${sample_id}_tbprofiler_failed.txt", optional: true
+
     script:
     """
-    tb-profiler profile \\
-        --read1 ${R1} \\
-        --read2 ${R2} \\
-        --prefix ${sample_id} \\
-        --threads ${task.cpus}
+    #!/bin/bash
+    set -euo pipefail
+
+    tb-profiler profile \
+        --read1 ${R1} \
+        --read2 ${R2} \
+        --prefix ${sample_id} \
+        --db ${HOME}/databases/tbprofiler/tbdb \
+        --txt \
+        --threads ${task.cpus} 2>&1 | tee tbprofiler_run_${sample_id}.log || true
+
+    if [[ ! -f results/${sample_id}.results.json ]]; then
+        echo "TB-Profiler failed for ${sample_id}" > ${sample_id}_tbprofiler_failed.txt
+    fi
     """
 }
+
+
 // ---------- SISTR2 (Salmonella) ----------
 process SISTR2 {
     tag "$sample_id"
@@ -661,4 +675,23 @@ workflow test_KRAKEN2 {
         .map { it.toString() }
         .view()
     KRAKEN2(assemblies.contigs, ch_kraken_db)
+}
+
+/*
+ * TEST 10: TB-Profiler only (reuses cached FASTP results)
+ * Run with:
+ *   nextflow run . -entry test_TB_PROFILER -resume
+ */
+workflow test_TB_PROFILER {
+
+    raw_pairs = channel.fromFilePairs(params.reads, flat: false)
+
+    trimmed = FASTP(raw_pairs)
+
+    // Show what TB-Profiler will receive
+    trimmed.trimmed_reads
+        .map { it.toString() }
+        .view()
+
+    TB_PROFILER(trimmed.trimmed_reads)
 }
