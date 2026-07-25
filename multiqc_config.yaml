@@ -4,7 +4,15 @@ custom_data:
     section_name: 'TB-Profiler Results'
     description: 'Lineage and drug-resistance calls from TB-Profiler v6.x'
     plot_type: 'table'
+  sistr2:
+    file_format: 'tsv'
+    section_name: 'SISTR2 Results'
+    description: 'Salmonella serovar prediction from SISTR2'
+    plot_type: 'table'
 
 sp:
   tbprofiler:
     fn: 'tbprofiler_summary.tsv'
+  sistr2:
+    fn: 'sistr2_summary.tsv'
+

@@ -450,16 +450,78 @@ process SISTR2 {
     maxRetries 0
     cpus   { params.global_cpus }
     memory { params.global_memory }
+
     input:
     tuple val(sample_id), path(contigs)
+
     output:
     tuple val(sample_id), path("${sample_id}_sistr2.json"), optional: true, emit: sistr2_json
     tuple val(sample_id), path("${sample_id}_sistr2.tsv"), optional: true, emit: sistr2_tsv
+
     script:
     """
-    sistr --qc -i ${contigs} -f json -f tsv -o ${sample_id}_sistr2    
+    #!/bin/bash
+
+    # -i needs BOTH fasta path AND genome name
+    sistr -i ${contigs} ${sample_id} -o ${sample_id}_sistr2 -f json 2>&1 | tee sistr_run_${sample_id}.log || true
+
+    # sistr writes to <output>_predictions.json  rename it
+    if [ -f ${sample_id}_sistr2_predictions.json ]; then
+        cp ${sample_id}_sistr2_predictions.json ${sample_id}_sistr2.json
+    fi
+
+        # Generate TSV from JSON
+    if [ -f ${sample_id}_sistr2.json ]; then
+        python3 -c "
+import json
+data=json.load(open('${sample_id}_sistr2.json'))
+# SISTR returns a LIST  take first element
+d = data[0] if isinstance(data, list) and data else {}
+# Try common serovar key names
+serovar = d.get('serovar', d.get('serovar_predicted', d.get('serovar_antigenic', 'NA')))
+# If still NA, build from antigenic_formula
+if serovar == 'NA' and d.get('antigenic_formula'):
+    serovar = 'antigenic: ' + str(d['antigenic_formula'])
+serogroup = d.get('serogroup', 'NA')
+h1 = d.get('h1', 'NA')
+h2 = d.get('h2', 'NA')
+cgmlst = d.get('cgmlst_ST', 'NA')
+subspecies = d.get('cgmlst_subspecies', 'NA')
+with open('${sample_id}_sistr2.tsv','w') as out:
+    out.write('Sample\\tSerovar\\tSerogroup\\tH1\\tH2\\tCGMLST_ST\\tSubspecies\\n')
+    out.write('${sample_id}\\t'+str(serovar)+'\\t'+str(serogroup)+'\\t'+str(h1)+'\\t'+str(h2)+'\\t'+str(cgmlst)+'\\t'+str(subspecies)+'\\n')
+" 2>/dev/null || true
+    else
+        echo "SISTR2 failed for ${sample_id}" > ${sample_id}_sistr2_failed.txt
+    fi
+
     """
 }
+
+// ---------- Combine SISTR2 results into one table ----------
+process SISTR_SUMMARY {
+    publishDir "${params.outdir}/sistr2", mode: 'copy'
+    errorStrategy = 'ignore'
+
+    input:
+    path sistr_tsvs
+
+    output:
+    path "sistr2_summary.tsv", optional: true, emit: sistr_summary
+
+    script:
+    """
+    #!/bin/bash
+    printf "Sample\\tSerovar\\tSerogroup\\tH1\\tH2\\tCGMLST_ST\\tSubspecies\\n" > sistr2_summary.tsv
+    for f in ${sistr_tsvs}; do
+        if [ -f "\$f" ]; then
+            tail -n +2 "\$f" >> sistr2_summary.tsv
+        fi
+    done
+    """
+}
+
+
 // ---------- AMRFinderPlus (Salmonella AMR) ----------
 process AMRFINDER {
     tag "$sample_id"
@@ -609,6 +671,10 @@ workflow {
                       .filter { id, c, rep -> decideOrganism(rep.toString()) == 'salmonella' }
                       .map    { id, c, rep -> tuple(id, c) }
         SISTR2(sal_inputs)
+        // Collect SISTR2 per-sample TSVs and merge
+        sistr_tsv       = SISTR2.out.sistr2_tsv.map { id, f -> f }.collect().ifEmpty([])
+        sistr_summary_out = SISTR_SUMMARY(sistr_tsv)
+
         AMRFINDER(sal_inputs)
         // MLST + VirulenceFinder: run on Listeria contigs
         lis_inputs = assemblies.contigs.join(kraken_out.kraken_reports)
@@ -646,9 +712,12 @@ workflow {
 
     // Feed the combined summary to MultiQC (not the individual per-sample files)
     all_reports = raw_reports
-        .mix(trimmed_reports, post_reports, quast_reports, busco_reports)
-        .mix(tb_reports, tb_txt_reports, tb_summary_out.tb_summary, sistr_reports, sistr_tsv, amr_reports, mlst_reports, vir_reports)
-        .collect()
+       .mix(trimmed_reports, post_reports, quast_reports, busco_reports)
+       .mix(tb_reports, tb_txt_reports, tb_summary_out.tb_summary,
+            sistr_reports, sistr_summary_out.sistr_summary,
+            amr_reports, mlst_reports, vir_reports)
+       .collect()
+
 
     MULTIQC(all_reports)
 
