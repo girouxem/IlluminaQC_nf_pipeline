@@ -542,6 +542,42 @@ process AMRFINDER {
     fi
     """
 }
+// ---------- Combine AMRFinderPlus results into one table ----------
+process AMR_SUMMARY {
+    publishDir "${params.outdir}/amrfinder", mode: 'copy'
+    errorStrategy 'ignore'
+
+    input:
+    path amr_tsvs
+
+    output:
+    path "amrfinder_summary.tsv", optional: true, emit: amr_summary
+
+        script:
+    """
+    #!/bin/bash
+    printf "Sample\\tAMR_Gene_Count\\tDrug_Classes\\tGene_Symbols\\n" > amrfinder_summary.tsv
+
+    for f in ${amr_tsvs}; do
+        if [ -f "\$f" ]; then
+            # Get sample name using bash string replacement (avoids sed)
+            f_name=\$(basename "\$f")
+            sample="\${f_name%_amrfinder.tsv}"
+            
+            # Count data rows (skip header)
+            count=\$(tail -n +2 "\$f" | wc -l)
+            
+            # Extract drug classes and gene symbols, join with ';' (no trailing semicolon)
+            drugs=\$(tail -n +2 "\$f" | cut -f12 | sort -u | paste -sd ';' -)
+            genes=\$(tail -n +2 "\$f" | cut -f6 | sort -u | paste -sd ';' -)
+            
+            printf "%s\\t%s\\t%s\\t%s\\n" "\$sample" "\$count" "\${drugs:-None}" "\${genes:-None}" >> amrfinder_summary.tsv
+        fi
+    done
+    """
+
+}
+
 // ---------- MLST (Listeria) ----------
 process MLST {
     tag "$sample_id"
@@ -676,6 +712,10 @@ workflow {
         sistr_summary_out = SISTR_SUMMARY(sistr_tsv)
 
         AMRFINDER(sal_inputs)
+        // Collect AMRFinderPlus per-sample TSVs and merge
+        amr_reports     = AMRFINDER.out.amr_tsv.map { id, f -> f }.collect().ifEmpty([])
+        amr_summary_out = AMR_SUMMARY(amr_reports)
+
         // MLST + VirulenceFinder: run on Listeria contigs
         lis_inputs = assemblies.contigs.join(kraken_out.kraken_reports)
                       .filter { id, c, rep -> decideOrganism(rep.toString()) == 'listeria' }
@@ -712,12 +752,12 @@ workflow {
 
     // Feed the combined summary to MultiQC (not the individual per-sample files)
     all_reports = raw_reports
-       .mix(trimmed_reports, post_reports, quast_reports, busco_reports)
-       .mix(tb_reports, tb_txt_reports, tb_summary_out.tb_summary,
-            sistr_reports, sistr_summary_out.sistr_summary,
-            amr_reports, mlst_reports, vir_reports)
-       .collect()
-
+        .mix(trimmed_reports, post_reports, quast_reports, busco_reports)
+        .mix(tb_reports, tb_txt_reports, tb_summary_out.tb_summary,
+             sistr_reports, sistr_summary_out.sistr_summary,
+             amr_summary_out.amr_summary,
+             mlst_reports, vir_reports)
+        .collect()
 
     MULTIQC(all_reports)
 

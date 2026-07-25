@@ -9,10 +9,15 @@ custom_data:
     section_name: 'SISTR2 Results'
     description: 'Salmonella serovar prediction from SISTR2'
     plot_type: 'table'
-
+  amrfinder:
+    file_format: 'tsv'
+    section_name: 'AMRFinderPlus Results'
+    description: 'AMR gene detection summary from AMRFinderPlus'
+    plot_type: 'table'
 sp:
   tbprofiler:
     fn: 'tbprofiler_summary.tsv'
   sistr2:
     fn: 'sistr2_summary.tsv'
-
+  amrfinder:
+    fn: 'amrfinder_summary.tsv'
