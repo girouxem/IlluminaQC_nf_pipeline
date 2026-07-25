@@ -313,50 +313,58 @@ process BUSCO_SUMMARY {
 }
 
 // ---------- Kraken2 classification ----------
+// ---------- Kraken2 classification (routes samples to typing tools) ----------
 process KRAKEN2 {
     tag "$sample_id"
     publishDir "${params.outdir}/kraken2", mode: 'copy'
     errorStrategy 'ignore'
     maxRetries 0
-    cpus   { params.cpus_kraken2 ?: params.global_cpus }
-    memory { params.mem_kraken2  ?: params.global_memory }
+
     input:
     tuple val(sample_id), path(contigs)
-    path kraken_db                         // Captures the staged database directory
+
     output:
     tuple val(sample_id), path("${sample_id}_kraken2.report"), optional: true, emit: kraken_reports
-    path "${sample_id}_kraken2.out", optional: true, emit: kraken_logs
 
     when:
     params.kraken_db != null
+
     script:
     """
     #!/bin/bash
     set -euo pipefail
-    kraken2 --db ${params.kraken_db} \\
-            --report ${sample_id}_kraken2.report \\
+
+    kraken2 --db ${params.kraken_db} \
+            --memory-mapping \
+            --threads ${task.cpus} \
+            --report ${sample_id}_kraken2.report \
             ${contigs} > ${sample_id}_kraken2.out 2>&1
+
+    if [[ ! -f ${sample_id}_kraken2.report ]]; then
+        echo "Kraken2 failed for ${sample_id}" > ${sample_id}_kraken2.report
+    fi
     """
+
 }
 // ---------- TB-Profiler (Mycobacterium bovis) ----------
 process TB_PROFILER {
     tag "$sample_id"
     publishDir "${params.outdir}/tbprofiler", mode: 'copy'
-    errorStrategy = 'ignore'
-    maxRetries = 0
+    errorStrategy 'ignore'
+    maxRetries 0
 
     input:
     tuple val(sample_id), path(R1), path(R2)
 
     output:
-    tuple val(sample_id), path("results/${sample_id}.results.json"), optional: true, emit: tbprofiler_json
-    tuple val(sample_id), path("results/${sample_id}.results.txt"), optional: true, emit: tbprofiler_txt
+    tuple val(sample_id), path("${sample_id}.results.json"), optional: true, emit: tbprofiler_json
+    tuple val(sample_id), path("${sample_id}.results.txt"), optional: true, emit: tbprofiler_txt
+    tuple val(sample_id), path("${sample_id}_tbprofiler_mqc.tsv"), optional: true, emit: tbprofiler_mqc
     path "${sample_id}_tbprofiler_failed.txt", optional: true
 
-    script:
+        script:
     """
     #!/bin/bash
-    set -euo pipefail
 
     tb-profiler profile \
         --read1 ${R1} \
@@ -366,12 +374,73 @@ process TB_PROFILER {
         --txt \
         --threads ${task.cpus} 2>&1 | tee tbprofiler_run_${sample_id}.log || true
 
-    if [[ ! -f results/${sample_id}.results.json ]]; then
+    LINEAGE="NA"
+    SUBLINEAGE="NA"
+    DRUGS="None"
+
+    if [[ -f results/${sample_id}.results.json ]]; then
+        cp results/${sample_id}.results.json . 2>/dev/null || true
+        cp results/${sample_id}.results.txt . 2>/dev/null || true
+
+                # Parse v6.x JSON with python3 -c (no heredoc, no file)
+        python3 -c "
+import json
+d=json.load(open('${sample_id}.results.json'))
+lin=d.get('lineage',[])
+lineage=lin[0].get('lineage','NA') if lin else 'NA'
+sublineage=d.get('sub_lineage','NA')
+if not sublineage or sublineage=='NA':
+    sublineage=lin[0].get('family','NA') if lin else 'NA'
+dr=d.get('dr_variants',[])
+drugs=[]
+for v in dr:
+    for ann in v.get('annotation',[]):
+        if ann.get('drug'): drugs.append(ann['drug'])
+drugs=sorted(set(drugs))
+drugs_str=';'.join(drugs) if drugs else 'None'
+with open('${sample_id}_tbprofiler_mqc.tsv','w') as out:
+    out.write('Sample\\tLineage\\tSublineage\\tDrug_Resistance\\n')
+    out.write('${sample_id}\\t'+lineage+'\\t'+sublineage+'\\t'+drugs_str+'\\n')
+" 2>/dev/null || true
+
+
+        if [[ ! -f ${sample_id}_tbprofiler_mqc.tsv ]]; then
+            printf "Sample\\tLineage\\tSublineage\\tDrug_Resistance\\n" > ${sample_id}_tbprofiler_mqc.tsv
+            printf "${sample_id}\\tPARSE_FAIL\\tPARSE_FAIL\\tPARSE_FAIL\\n" >> ${sample_id}_tbprofiler_mqc.tsv
+        fi
+    else
         echo "TB-Profiler failed for ${sample_id}" > ${sample_id}_tbprofiler_failed.txt
+        printf "Sample\\tLineage\\tSublineage\\tDrug_Resistance\\n" > ${sample_id}_tbprofiler_mqc.tsv
+        printf "${sample_id}\\tNA\\tNA\\tNone\\n" >> ${sample_id}_tbprofiler_mqc.tsv
     fi
     """
 }
+// ---------- Combine TB-Profiler results into one table ----------
+process TB_SUMMARY {
+    publishDir "${params.outdir}/tbprofiler", mode: 'copy'
+    errorStrategy 'ignore'
 
+    input:
+    path tb_tsvs
+
+    output:
+    path "tbprofiler_summary.tsv", optional: true, emit: tb_summary
+
+    script:
+    """
+    #!/bin/bash
+    # Always create the file, even if empty
+    printf "Sample\\tLineage\\tSublineage\\tDrug_Resistance\\n" > tbprofiler_summary.tsv
+
+    # tb_tsvs may be a single file or a list  handle both
+    for f in ${tb_tsvs}; do
+        if [ -f "\$f" ]; then
+            # Skip header row, append data
+            tail -n +2 "\$f" >> tbprofiler_summary.tsv
+        fi
+    done
+    """
+}
 
 // ---------- SISTR2 (Salmonella) ----------
 process SISTR2 {
@@ -385,9 +454,10 @@ process SISTR2 {
     tuple val(sample_id), path(contigs)
     output:
     tuple val(sample_id), path("${sample_id}_sistr2.json"), optional: true, emit: sistr2_json
+    tuple val(sample_id), path("${sample_id}_sistr2.tsv"), optional: true, emit: sistr2_tsv
     script:
     """
-    sistr --qc -i ${contigs} -f json -o ${sample_id}_sistr2.json
+    sistr --qc -i ${contigs} -f json -f tsv -o ${sample_id}_sistr2    
     """
 }
 // ---------- AMRFinderPlus (Salmonella AMR) ----------
@@ -401,10 +471,13 @@ process AMRFINDER {
     input:
     tuple val(sample_id), path(contigs)
     output:
-    tuple val(sample_id), path("${sample_id}_amrfinder.txt"), optional: true, emit: amr_txt
+    tuple val(sample_id), path("${sample_id}_amrfinder.tsv"), optional: true, emit: amr_tsv
     script:
     """
-    amrfinder -n ${contigs} -o ${sample_id}_amrfinder.txt
+    amrfinder -n ${contigs} -o ${sample_id}_amrfinder.tsv || true
+    if [[ ! -s ${sample_id}_amrfinder.tsv ]]; then
+        echo "Protein identifier,Contig id,Start,End,Strand,Gene symbol,Sequence name,Method,Scope,Element type,Element subtype,Class,Subclass,Method,Target length,Reference length,Coverage,Identity,Match type,PMID,Alignment length" > ${sample_id}_amrfinder.tsv
+    fi
     """
 }
 // ---------- MLST (Listeria) ----------
@@ -418,10 +491,13 @@ process MLST {
     input:
     tuple val(sample_id), path(contigs)
     output:
-    tuple val(sample_id), path("${sample_id}_mlst.txt"), optional: true, emit: mlst_txt
+    tuple val(sample_id), path("${sample_id}_mlst.tsv"), optional: true, emit: mlst_tsv
     script:
     """
-    mlst ${contigs} > ${sample_id}_mlst.txt
+    mlst ${contigs} > ${sample_id}_mlst.tsv || true
+    if [[ ! -s ${sample_id}_mlst.tsv ]]; then
+        echo "No MLST scheme found" > ${sample_id}_mlst.tsv
+    fi
     """
 }
 // ---------- VirulenceFinder (Listeria) ----------
@@ -432,41 +508,57 @@ process VIRULENCEFINDER {
     maxRetries 0
     cpus   { params.global_cpus }
     memory { params.global_memory }
+
     input:
     tuple val(sample_id), path(contigs)
-    path virulence_db                     // Receives the database via an auto-mounting Nextflow path channel
+
     output:
     tuple val(sample_id), path("${sample_id}_virulence.json"), optional: true, emit: vir_json
+    tuple val(sample_id), path("${sample_id}_virulence.txt"), optional: true, emit: vir_txt
+
     when:
     params.virulence_db != null
+
     script:
     """
     #!/bin/bash
     set -euo pipefail
-    virulencefinder.py \\
-       -i ${contigs} \\
-       -o ${sample_id}_vf \\
-       -p ${params.virulence_db} \\
-       -x \\
-       --json
-    cp ${sample_id}_vf/*.json ${sample_id}_virulence.json 2>/dev/null || touch ${sample_id}_virulence.json
+
+    if [[ ! -s "${contigs}" ]]; then
+        echo "No contigs for ${sample_id}" > ${sample_id}_virulence.txt
+        echo "{}" > ${sample_id}_virulence.json
+        exit 0
+    fi
+
+    virulencefinder.py \
+       -i ${contigs} \
+       -o ${sample_id}_vf \
+       -p ${params.virulence_db} \
+       -x \
+       --json 2>&1 | tee virulencefinder_run_${sample_id}.log || true
+
+    cp ${sample_id}_vf/*.json ${sample_id}_virulence.json 2>/dev/null || echo "{}" > ${sample_id}_virulence.json
+    cp ${sample_id}_vf/*.txt ${sample_id}_virulence.txt 2>/dev/null || echo "No virulence genes found" > ${sample_id}_virulence.txt
     """
 }
-
 // ---------- MULTIQC (now includes QUAST + BUSCO) ----------
 process MULTIQC {
     publishDir "${params.outdir}/multiqc", mode: 'copy'
     cpus   { params.global_cpus }
     memory { params.global_memory }
+
     input:
     path all_reports
+
     output:
     path "multiqc_report.html"
+
     script:
     """
-    multiqc . -o ./
+    multiqc . -o ./ -c ${baseDir}/multiqc_config.yaml
     """
 }
+
 
 /*
  * NORMAL FULL WORKFLOW
@@ -504,8 +596,7 @@ workflow {
     BUSCO_SUMMARY(busco_collected)
 
     // Kraken2 classification for routing
-    ch_kraken_db = params.kraken_db ? file(params.kraken_db, checkIfExists: true) : []
-    kraken_out = KRAKEN2(assemblies.contigs, ch_kraken_db)
+    kraken_out = KRAKEN2(assemblies.contigs)
     // Route samples to typing tools based on Kraken2 result
     if (params.kraken_db) {
         // TB-Profiler: needs reads, run on M. bovis samples
@@ -524,17 +615,43 @@ workflow {
                       .filter { id, c, rep -> decideOrganism(rep.toString()) == 'listeria' }
                       .map    { id, c, rep -> tuple(id, c) }
         MLST(lis_inputs)
-        ch_virulence_db = params.virulence_db ? file(params.virulence_db, checkIfExists: true) : []
-        VIRULENCEFINDER(lis_inputs, ch_virulence_db)
+        VIRULENCEFINDER(lis_inputs)
+
 
     }
     // MultiQC: now includes QUAST + BUSCO outputs
     quast_reports = quast_out.quast_reports.map { p -> p }
     busco_reports = busco_out.busco_reports.map { p -> p }
+    
+        // Collect QC reports
+    raw_reports     = raw_fastqc.fastqc_zip.map { id, f -> f }
+    trimmed_reports = trimmed.fastp_json.map { id, f -> f }
+    post_reports    = trimmed_fastqc.fastqc_zip_trim.map { id, f -> f }
+    quast_reports   = quast_out.quast_reports.map { p -> p }
+    busco_reports   = busco_out.busco_reports.map { p -> p }
+
+    // Collect typing reports (empty if tools didn't run)
+    // Collect TB-Profiler per-sample TSVs and merge into one table
+    tb_mqc_reports  = TB_PROFILER.out.tbprofiler_mqc.map { id, f -> f }.collect().ifEmpty([])
+    tb_summary_out  = TB_SUMMARY(tb_mqc_reports)
+
+    // Other typing reports (unchanged)
+    tb_reports      = TB_PROFILER.out.tbprofiler_json.map { id, f -> f }.ifEmpty([])
+    tb_txt_reports  = TB_PROFILER.out.tbprofiler_txt.map { id, f -> f }.ifEmpty([])
+    sistr_reports   = SISTR2.out.sistr2_json.map { id, f -> f }.ifEmpty([])
+    sistr_tsv       = SISTR2.out.sistr2_tsv.map { id, f -> f }.ifEmpty([])
+    amr_reports     = AMRFINDER.out.amr_tsv.map { id, f -> f }.ifEmpty([])
+    mlst_reports    = MLST.out.mlst_tsv.map { id, f -> f }.ifEmpty([])
+    vir_reports     = VIRULENCEFINDER.out.vir_json.map { id, f -> f }.ifEmpty([])
+
+    // Feed the combined summary to MultiQC (not the individual per-sample files)
     all_reports = raw_reports
         .mix(trimmed_reports, post_reports, quast_reports, busco_reports)
+        .mix(tb_reports, tb_txt_reports, tb_summary_out.tb_summary, sistr_reports, sistr_tsv, amr_reports, mlst_reports, vir_reports)
         .collect()
+
     MULTIQC(all_reports)
+
 }
 
 /*
@@ -670,11 +787,11 @@ workflow test_KRAKEN2 {
     raw_pairs = channel.fromFilePairs(params.reads, flat: false)
     trimmed = FASTP(raw_pairs)
     assemblies = SPADES(trimmed.trimmed_reads)
-    ch_kraken_db = file(params.kraken_db, checkIfExists: true)
     assemblies.contigs
         .map { it.toString() }
         .view()
-    KRAKEN2(assemblies.contigs, ch_kraken_db)
+    KRAKEN2(assemblies.contigs)
+
 }
 
 /*
@@ -694,4 +811,84 @@ workflow test_TB_PROFILER {
         .view()
 
     TB_PROFILER(trimmed.trimmed_reads)
+}
+
+/*
+ * TEST 11: Kraken2 routing (reuses cached SPADES assemblies)
+ * Run with:
+ *   nextflow run . -entry test_KRAKEN2_ROUTING --kraken_db ~/databases/kraken2 -resume
+ *
+ * Verifies:
+ *   1. Kraken2 runs on each assembly
+ *   2. decideOrganism() reads each report correctly
+ *   3. Each sample is routed to the correct typing tool
+ */
+workflow test_KRAKEN2_ROUTING {
+
+    raw_pairs = channel.fromFilePairs(params.reads, flat: false)
+
+    trimmed = FASTP(raw_pairs)
+
+    assemblies = SPADES(trimmed.trimmed_reads)
+
+    // Run Kraken2 on each assembly
+    kraken_out = KRAKEN2(assemblies.contigs)
+
+    // Show what Kraken2 produced
+    kraken_out.kraken_reports
+        .map { id, rep -> "KRAKEN2: ${id} -> ${rep}" }
+        .view()
+
+    // Join assemblies with kraken reports so we can route
+    // Shape after join: [sample_id, contigs, kraken_report]
+    routed = assemblies.contigs.join(kraken_out.kraken_reports)
+
+    // Apply the routing function and show the decision
+    routed
+        .map { id, contigs, rep ->
+            def org = decideOrganism(rep.toString())
+            "ROUTING: ${id} -> ${org}"
+        }
+        .view()
+
+    // --- TB-Profiler: needs reads, route M. bovis samples ---
+    tb_inputs = trimmed.trimmed_reads.join(kraken_out.kraken_reports)
+                 .filter { id, r1, r2, rep -> decideOrganism(rep.toString()) == 'mbovis' }
+                 .map    { id, r1, r2, rep -> tuple(id, r1, r2) }
+
+    tb_inputs
+        .map { id, r1, r2 -> "TB_PROFILER will run on: ${id}" }
+        .view()
+
+    TB_PROFILER(tb_inputs)
+
+    // --- SISTR2 + AMRFinderPlus: route Salmonella samples ---
+    sal_inputs = assemblies.contigs.join(kraken_out.kraken_reports)
+                  .filter { id, c, rep -> decideOrganism(rep.toString()) == 'salmonella' }
+                  .map    { id, c, rep -> tuple(id, c) }
+
+    sal_inputs
+        .map { id, c -> "SISTR2 + AMRFINDER will run on: ${id}" }
+        .view()
+
+    SISTR2(sal_inputs)
+    AMRFINDER(sal_inputs)
+
+    // --- MLST + VirulenceFinder: route Listeria samples ---
+    lis_inputs = assemblies.contigs.join(kraken_out.kraken_reports)
+                  .filter { id, c, rep -> decideOrganism(rep.toString()) == 'listeria' }
+                  .map    { id, c, rep -> tuple(id, c) }
+
+    lis_inputs
+        .map { id, c -> "MLST + VIRULENCEFINDER will run on: ${id}" }
+        .view()
+
+    MLST(lis_inputs)
+    VIRULENCEFINDER(lis_inputs)
+
+    // --- Virus / other: no typing, just log it ---
+    assemblies.contigs.join(kraken_out.kraken_reports)
+        .filter { id, c, rep -> decideOrganism(rep.toString()) == 'virus' }
+        .map { id, c, rep -> "VIRUS detected (no typing): ${id}" }
+        .view()
 }

@@ -1,0 +1,10 @@
+custom_data:
+  tbprofiler:
+    file_format: 'tsv'
+    section_name: 'TB-Profiler Results'
+    description: 'Lineage and drug-resistance calls from TB-Profiler v6.x'
+    plot_type: 'table'
+
+sp:
+  tbprofiler:
+    fn: 'tbprofiler_summary.tsv'
