@@ -623,6 +623,34 @@ process MLST {
 }
 
 
+// ---------- Combine MLST results into one table ----------
+process MLST_SUMMARY {
+    publishDir "${params.outdir}/mlst", mode: 'copy'
+    input:
+    path mlst_tsvs
+    output:
+    path "mlst_typing_summary.tsv", emit: mlst_summary
+    script:
+    """
+    #!/bin/bash
+    printf "Sample\\tMLST_Scheme\\tST_Type\\tAlleles\\n" > mlst_typing_summary.tsv
+    for f in ${mlst_tsvs}; do
+        if [ -f "\$f" ]; then
+            f_name=\$(basename "\$f")
+            sample="\${f_name%_mlst.tsv}"
+            # mlst output: filepath scheme ST allele1 allele2 ...
+            # Extract scheme (col 2), ST (col 3), and join alleles (col 4+) with ;
+            scheme=\$(cut -f2 "\$f" | head -1)
+            st=\$(cut -f3 "\$f" | head -1)
+            alleles=\$(cut -f4- "\$f" | head -1 | tr '\\t' ';')
+            printf "%s\\t%s\\t%s\\t%s\\n" "\$sample" "\${scheme:-NA}" "\${st:-NA}" "\${alleles:-NA}" >> mlst_typing_summary.tsv
+        fi
+    done
+    """
+}
+
+
+
 // ---------- VirulenceFinder (Listeria) ----------
 process VIRULENCEFINDER {
     tag "$sample_id"
@@ -642,19 +670,74 @@ process VIRULENCEFINDER {
     """
     #!/bin/bash
     set -euo pipefail
+
     if [[ ! -s "${contigs}" ]]; then
         echo "No contigs for ${sample_id}" > ${sample_id}_virulence.txt
         echo "{}" > ${sample_id}_virulence.json
         exit 0
     fi
+
+    # genomicepidemiology/virulencefinder uses -ifa, -d, -o
     virulencefinder.py \\
-       -i ${contigs} \\
-       -o ${sample_id}_vf \\
-       -p ${params.virulence_db} \\
-       -x \\
-       --json 2>&1 | tee virulencefinder_run_${sample_id}.log || true
-    cp ${sample_id}_vf/*.json ${sample_id}_virulence.json 2>/dev/null || echo "{}" > ${sample_id}_virulence.json
-    cp ${sample_id}_vf/*.txt ${sample_id}_virulence.txt 2>/dev/null || echo "No virulence genes found" > ${sample_id}_virulence.txt
+        -ifa ${contigs} \\
+        -o ${sample_id}_vf \\
+        -d ${params.virulence_db} \\
+        -x \\
+        -j 2>&1 | tee virulencefinder_run_${sample_id}.log || true
+
+    # Find and copy the JSON output
+    find ${sample_id}_vf -name "*.json" -exec cp {} ${sample_id}_virulence.json \\; 2>/dev/null || echo "{}" > ${sample_id}_virulence.json
+
+    # Find and copy the text output
+    find ${sample_id}_vf -name "*.txt" -exec cp {} ${sample_id}_virulence.txt \\; 2>/dev/null || echo "No virulence genes found" > ${sample_id}_virulence.txt
+    """
+}
+
+
+// ---------- Combine VirulenceFinder results into one table ----------
+process VIRULENCE_SUMMARY {
+    publishDir "${params.outdir}/virulencefinder", mode: 'copy'
+    input:
+    path vir_jsons
+    output:
+    path "virulencefinder_summary.tsv", emit: vir_summary
+    script:
+    """
+    #!/bin/bash
+    printf "Sample\\tVirulence_Gene_Count\\tVirulence_Genes\\n" > virulencefinder_summary.tsv
+    for f in ${vir_jsons}; do
+        if [ -f "\$f" ] && [ -s "\$f" ]; then
+            f_name=\$(basename "\$f")
+            sample="\${f_name%_virulence.json}"
+            python3 -c "
+import json, sys
+try:
+    d=json.load(open('\$f'))
+    genes=[]
+    # Try different JSON structures
+    if isinstance(d, dict):
+        results = d.get('virulencefinder', {}).get('results', {})
+        if not results:
+            results = d.get('results', {})
+        for k,v in results.items():
+            if isinstance(v, dict):
+                for hit in v.get('virulencefinder', {}).get('hits', []):
+                    genes.append(hit.get('gene', 'NA'))
+                for hit in v.get('hits', []):
+                    genes.append(hit.get('gene', 'NA'))
+    count = len(genes)
+    genes_str = ';'.join(sorted(set(genes))) if genes else 'None'
+    print(f'{count}')
+    print(f'{genes_str}')
+except Exception as e:
+    print('0')
+    print('None')
+" > /tmp/vf_out.txt 2>/dev/null
+            cnt=\$(head -1 /tmp/vf_out.txt)
+            genes=\$(tail -1 /tmp/vf_out.txt)
+            printf "%s\\t%s\\t%s\\n" "\$sample" "\${cnt:-0}" "\${genes:-None}" >> virulencefinder_summary.tsv
+        fi
+    done
     """
 }
 
@@ -664,15 +747,20 @@ process MULTIQC {
     publishDir "${params.outdir}/multiqc", mode: 'copy'
     cpus   { params.global_cpus }
     memory { params.global_memory }
+    
     input:
     path all_reports
+    path multiqc_config
+    
     output:
     path "multiqc_report.html"
+    
     script:
     """
-    multiqc . -o ./ -c ${baseDir}/multiqc_config.yaml
+    multiqc . -o ./ -c ${multiqc_config}
     """
 }
+
 
 
 // Full pipeline
@@ -732,10 +820,16 @@ workflow {
                       .filter { id, c, rep -> decideOrganism(rep.toString()) == 'listeria' }
                       .map    { id, c, rep -> tuple(id, c) }
         MLST(lis_inputs)
+        mlst_tsv = MLST.out.mlst_tsv.map { id, f -> f }.collect()
+        MLST_SUMMARY(mlst_tsv)
+
         VIRULENCEFINDER(lis_inputs)
+        vir_jsons = VIRULENCEFINDER.out.vir_json.map { id, f -> f }.collect()
+        VIRULENCE_SUMMARY(vir_jsons)
+
     }
 
-        // ---- Safe QC channels + retention ----
+    // ---- Safe QC channels + retention ----
     raw_reports     = raw_fastqc.fastqc_zip.map { id, f -> f }
     trimmed_reports = trimmed.fastp_json.map { id, f -> f }
     post_reports    = trimmed_fastqc.fastqc_zip_trim.map { id, f -> f }
@@ -757,6 +851,10 @@ workflow {
     // BUSCO summary table
     busco_summary_file = BUSCO_SUMMARY.out.busco_summary.collect().flatten()
 
+    // MLST + VirulenceFinder summaries
+    mlst_summary_file = MLST_SUMMARY.out.mlst_summary.collect().flatten()
+    vir_summary_file  = VIRULENCE_SUMMARY.out.vir_summary.collect().flatten()
+
     all_reports = raw_reports
         .mix(trimmed_reports, post_reports, quast_reports, busco_reports)
         .mix(retention_files)
@@ -764,11 +862,11 @@ workflow {
         .mix(sistr_summary_file)
         .mix(amr_summary_file)
         .mix(busco_summary_file)
+        .mix(mlst_summary_file)
+        .mix(vir_summary_file)
         .collect()
 
-
-
-    MULTIQC(all_reports)
+    MULTIQC(all_reports, file("${baseDir}/multiqc_config.yaml"))
 
 }
 
@@ -874,4 +972,21 @@ workflow test_KRAKEN2_ROUTING {
     lis_inputs.map { id, c -> "MLST + VIRULENCEFINDER will run on: ${id}" }.view()
     MLST(lis_inputs)
     VIRULENCEFINDER(lis_inputs)
+}
+
+/*
+ * TEST: VirulenceFinder only
+ * Run with:
+ *   nextflow run . -entry test_VIRULENCEFINDER --virulence_db /home/girouxeml/databases/virulencefinder_db -resume
+ */
+workflow test_VIRULENCEFINDER {
+    raw_pairs = channel.fromFilePairs(params.reads, flat: false)
+    trimmed = FASTP(raw_pairs)
+    assemblies = SPADES(trimmed.trimmed_reads)
+    
+    assemblies.contigs
+        .map { it.toString() }
+        .view()
+    
+    VIRULENCEFINDER(assemblies.contigs)
 }

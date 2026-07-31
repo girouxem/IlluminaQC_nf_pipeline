@@ -27,6 +27,21 @@ custom_data:
     section_name: 'Base Retention Plot'
     description: 'Bar chart of base retention per sample'
     plot_type: 'image'
+  busco_summary:
+    file_format: 'tsv'
+    section_name: 'BUSCO Completeness'
+    description: 'Genome completeness assessment'
+    plot_type: 'table'
+  mlst_summary:
+    file_format: 'tsv'
+    section_name: 'MLST Results'
+    description: 'Multilocus sequence typing results'
+    plot_type: 'table'
+  virulencefinder_summary:
+    file_format: 'tsv'
+    section_name: 'VirulenceFinder Results'
+    description: 'Virulence gene detection summary'
+    plot_type: 'table'
 
 sp:
   tbprofiler:
@@ -38,7 +53,12 @@ sp:
   retention_summary:
     fn: 'retention_summary.tsv'
   retention_image_read:
-    fn: 'read_retention_bar.png'
+    fn: 'retention_read_bar.png'
   retention_image_base:
-    fn: 'base_retention_bar.png'
-
+    fn: 'retention_base_bar.png'
+  busco_summary:
+    fn: 'busco_summary.tsv'
+  mlst_summary:
+    fn: 'mlst_typing_summary.tsv'
+  virulencefinder_summary:
+    fn: 'virulencefinder_summary.tsv'
