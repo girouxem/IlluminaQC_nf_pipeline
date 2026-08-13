@@ -17,6 +17,9 @@ params.cpus_kraken2   = params.cpus_kraken2   ?: null
 params.mem_kraken2    = params.mem_kraken2    ?: null
 params.cpus_quast     = params.cpus_quast     ?: null
 params.mem_quast      = params.mem_quast      ?: null
+params.vsnp_ref       = params.vsnp_ref       ?: null
+params.vsnp_options   = params.vsnp_options   ?: null
+params.tbprofiler_db  = params.tbprofiler_db  ?: "/home/girouxeml/databases/tbprofiler/tbdb"
 
 
 // Helper: decide organism from Kraken2 report
@@ -425,7 +428,7 @@ process TB_PROFILER {
         --read1 ${R1} \\
         --read2 ${R2} \\
         --prefix ${sample_id} \\
-        --db ${HOME}/databases/tbprofiler/tbdb \\
+        --db ${params.tbprofiler_db} \\
         --txt \\
         --threads ${task.cpus} 2>&1 | tee tbprofiler_run_${sample_id}.log || true
 
@@ -650,7 +653,6 @@ process MLST_SUMMARY {
 }
 
 
-
 // ---------- VirulenceFinder (Listeria) ----------
 process VIRULENCEFINDER {
     tag "$sample_id"
@@ -741,7 +743,6 @@ except Exception as e:
     """
 }
 
-
 // ---------- MULTIQC ----------
 process MULTIQC {
     publishDir "${params.outdir}/multiqc", mode: 'copy'
@@ -761,9 +762,421 @@ process MULTIQC {
     """
 }
 
+// ---------- Checkpoint Report (95/85/80% thresholds) ----------
+process CHECKPOINT_REPORT {
+    publishDir "${params.outdir}/checkpoints", mode: 'copy'
+    cpus   { params.global_cpus }
+    memory { params.global_memory }
+
+    input:
+    path retention_csvs
+    path quast_dirs
+
+    output:
+    path "checkpoint_summary.tsv", emit: checkpoint_tsv
+    path "checkpoint_bar.png", emit: checkpoint_plot
+
+    script:
+    """
+    #!/usr/bin/env python3
+    import csv, os, sys, json
+    import matplotlib
+    matplotlib.use('Agg')
+    import matplotlib.pyplot as plt
+    import pandas as pd
+
+    # Parse retention CSVs
+    retention = {}
+    for f in "${retention_csvs}".split():
+        if os.path.exists(f):
+            df = pd.read_csv(f)
+            for _, row in df.iterrows():
+                sample = row['sample']
+                retention[sample] = {
+                    'reads_before': int(row['reads_before']),
+                    'reads_after': int(row['reads_after']),
+                    'bases_before': int(row['bases_before']),
+                    'bases_after': int(row['bases_after'])
+                }
+
+    # Parse QUAST reports for assembly stats
+    assembly = {}
+    for d in "${quast_dirs}".split():
+        if os.path.isdir(d):
+            report_file = os.path.join(d, 'report.tsv')
+            if not os.path.exists(report_file):
+                report_file = os.path.join(d, 'report.txt')
+            if os.path.exists(report_file):
+                with open(report_file) as rf:
+                    for line in rf:
+                        parts = line.strip().split('\\t')
+                        if len(parts) >= 2:
+                            if parts[0] == 'Total length':
+                                # QUAST dir name is like MBWGS001_quast
+                                sample = os.path.basename(d).replace('_quast', '')
+                                assembly[sample] = int(parts[1].replace(',', '').replace('.', ''))
+
+    # Build checkpoint summary
+    rows = []
+    for sample in sorted(set(list(retention.keys()) + list(assembly.keys()))):
+        ret = retention.get(sample, {})
+        asm = assembly.get(sample, 0)
+
+        reads_before = ret.get('reads_before', 0)
+        reads_after = ret.get('reads_after', 0)
+        bases_before = ret.get('bases_before', 0)
+        bases_after = ret.get('bases_after', 0)
+
+        # Checkpoint 1: Basecalled (always 100% since we start from FASTQs)
+        basecalled_pct = 100.0
+        basecalled_pass = "PASS" if basecalled_pct >= 95 else "FAIL"
+
+        # Checkpoint 2: QC retention
+        qc_pct = (reads_after / reads_before * 100) if reads_before > 0 else 0
+        qc_pass = "PASS" if qc_pct >= 85 else "FAIL"
+
+        # Checkpoint 3: Assembly retention (assembly bases / trimmed bases)
+        assembly_pct = (asm / bases_after * 100) if bases_after > 0 and asm > 0 else 0
+        assembly_pass = "PASS" if assembly_pct >= 80 else "FAIL"
+
+        overall = "PASS" if all([basecalled_pass == "PASS", qc_pass == "PASS", assembly_pass == "PASS"]) else "FAIL"
+
+        rows.append({
+            'Sample': sample,
+            'Basecalled_Pct': f"{basecalled_pct:.1f}",
+            'Basecalled_Status': basecalled_pass,
+            'QC_Pct': f"{qc_pct:.1f}",
+            'QC_Status': qc_pass,
+            'Assembly_Pct': f"{assembly_pct:.1f}" if assembly_pct > 0 else "N/A",
+            'Assembly_Status': assembly_pass,
+            'Overall_Status': overall
+        })
+
+    # Write TSV
+    df_out = pd.DataFrame(rows)
+    df_out.to_csv("checkpoint_summary.tsv", sep="\\t", index=False)
+
+    # Create bar chart
+    if rows:
+        fig, ax = plt.subplots(figsize=(12, 6))
+        samples = [r['Sample'] for r in rows]
+        x = range(len(samples))
+        width = 0.25
+
+        basecalled_vals = [float(r['Basecalled_Pct']) for r in rows]
+        qc_vals = [float(r['QC_Pct']) for r in rows]
+        assembly_vals = [float(r['Assembly_Pct']) if r['Assembly_Pct'] != 'N/A' else 0 for r in rows]
+
+        ax.bar([i - width for i in x], basecalled_vals, width, color='green', label='Basecalled (95%)')
+        ax.bar(x, qc_vals, width, color='steelblue', label='QC (85%)')
+        ax.bar([i + width for i in x], assembly_vals, width, color='darkorange', label='Assembly (80%)')
+
+        ax.axhline(y=95, color='green', linestyle='--', alpha=0.5)
+        ax.axhline(y=85, color='steelblue', linestyle='--', alpha=0.5)
+        ax.axhline(y=80, color='darkorange', linestyle='--', alpha=0.5)
+
+        ax.set_xticks(x)
+        ax.set_xticklabels(samples, rotation=45, ha='right')
+        ax.set_ylabel('Retention (%)')
+        ax.set_title('Sample Checkpoints: 95% Basecalled / 85% QC / 80% Assembly')
+        ax.legend()
+        ax.set_ylim(0, 110)
+        plt.tight_layout()
+        plt.savefig("checkpoint_bar.png", dpi=150)
+        plt.close()
+    """
+}
+
+// ---------- Assembly Visualization (N50 + Sankey) ----------
+process ASSEMBLY_VIZ {
+    publishDir "${params.outdir}/assembly_plots", mode: 'copy'
+    cpus   { params.global_cpus }
+    memory { params.global_memory }
+
+    input:
+    path retention_csvs
+    path quast_dirs
+
+    output:
+    path "n50_bar.png", emit: n50_plot
+    path "sankey_retention.png", emit: sankey_plot
+    path "assembly_metrics_summary.tsv", emit: assembly_summary
+
+    script:
+    """
+    #!/usr/bin/env python3
+    import csv, os, sys
+    import matplotlib
+    matplotlib.use('Agg')
+    import matplotlib.pyplot as plt
+    import pandas as pd
+    import plotly.graph_objects as go
+    from plotly.subplots import make_subplots
+
+    # Parse retention CSVs
+    retention = {}
+    for f in "${retention_csvs}".split():
+        if os.path.exists(f):
+            df = pd.read_csv(f)
+            for _, row in df.iterrows():
+                retention[row['sample']] = {
+                    'reads_before': int(row['reads_before']),
+                    'reads_after': int(row['reads_after']),
+                    'bases_before': int(row['bases_before']),
+                    'bases_after': int(row['bases_after'])
+                }
+
+    # Parse QUAST reports for N50 and total length
+    assembly = {}
+    for d in "${quast_dirs}".split():
+        if os.path.isdir(d):
+            report_file = os.path.join(d, 'report.tsv')
+            if not os.path.exists(report_file):
+                report_file = os.path.join(d, 'report.txt')
+            if os.path.exists(report_file):
+                sample = os.path.basename(d).replace('_quast', '')
+                with open(report_file) as rf:
+                    for line in rf:
+                        parts = line.strip().split('\\t')
+                        if len(parts) >= 2:
+                            if parts[0] == 'N50':
+                                assembly[sample] = {'n50': int(parts[1].replace(',', '').replace('.', ''))}
+                            if parts[0] == 'Total length' and sample in assembly:
+                                assembly[sample]['total'] = int(parts[1].replace(',', '').replace('.', ''))
+
+    # ---- N50 Bar Chart ----
+    samples = sorted(assembly.keys())
+    if samples:
+        fig, ax = plt.subplots(figsize=(12, 6))
+        n50_vals = [assembly[s].get('n50', 0) for s in samples]
+        colors = ['steelblue' if v > 0 else 'red' for v in n50_vals]
+        ax.bar(range(len(samples)), n50_vals, color=colors)
+        ax.set_xticks(range(len(samples)))
+        ax.set_xticklabels(samples, rotation=45, ha='right')
+        ax.set_ylabel('N50 (bp)')
+        ax.set_title('Assembly N50 per Sample')
+        plt.tight_layout()
+        plt.savefig("n50_bar.png", dpi=150)
+        plt.close()
+    else:
+        fig, ax = plt.subplots()
+        ax.text(0.5, 0.5, "No assembly data", ha='center')
+        plt.savefig("n50_bar.png", dpi=150)
+        plt.close()
+
+    # ---- Summary TSV ----
+    rows = []
+    for s in sorted(set(list(retention.keys()) + list(assembly.keys()))):
+        ret = retention.get(s, {})
+        asm = assembly.get(s, {})
+        rows.append({
+            'Sample': s,
+            'Reads_Before': ret.get('reads_before', 0),
+            'Reads_After': ret.get('reads_after', 0),
+            'Bases_Before': ret.get('bases_before', 0),
+            'Bases_After': ret.get('bases_after', 0),
+            'Assembly_Length': asm.get('total', 0),
+            'N50': asm.get('n50', 0),
+            'Read_Retention_Pct': f"{(ret.get('reads_after',0)/ret.get('reads_before',1)*100):.1f}" if ret.get('reads_before',0) > 0 else "0",
+            'Assembly_Retention_Pct': f"{(asm.get('total',0)/ret.get('bases_after',1)*100):.1f}" if ret.get('bases_after',0) > 0 and asm.get('total',0) > 0 else "0"
+        })
+    pd.DataFrame(rows).to_csv("assembly_metrics_summary.tsv", sep="\\t", index=False)
+
+    # ---- Sankey Diagram ----
+    # ---- Retention Flow Chart (Matplotlib stacked bar) ----
+    if rows:
+        all_samples = [r['Sample'] for r in rows]
+        reads_before = [r['Reads_Before'] for r in rows]
+        reads_after = [r['Reads_After'] for r in rows]
+        assembly_reads = [r['Assembly_Length'] for r in rows]
+
+        fig, ax = plt.subplots(figsize=(12, 6))
+        x = range(len(all_samples))
+        width = 0.25
+
+        ax.bar([i - width for i in x], reads_before, width, color='steelblue', label='Raw Reads')
+        ax.bar(x, reads_after, width, color='darkorange', label='Trimmed Reads')
+        ax.bar([i + width for i in x], assembly_reads, width, color='green', label='Assembly Bases')
+
+        ax.set_xticks(x)
+        ax.set_xticklabels(all_samples, rotation=45, ha='right')
+        ax.set_ylabel('Count (Reads / Bases)')
+        ax.set_title('Retention Flow: Raw → Trimmed → Assembly')
+        ax.legend()
+        ax.set_yscale('log') # Log scale helps visualize vastly different magnitudes
+        plt.tight_layout()
+        plt.savefig("sankey_retention.png", dpi=150)
+        plt.close()
+    else:
+        fig, ax = plt.subplots()
+        ax.text(0.5, 0.5, "No data for flow chart", ha='center')
+        plt.savefig("sankey_retention.png", dpi=150)
+        plt.close()
+
+    """
+}
+// ---------- Read Length Histograms ----------
+process READ_LEN_HIST {
+    publishDir "${params.outdir}/read_length_plots", mode: 'copy'
+    cpus   { params.global_cpus }
+    memory { params.global_memory }
+
+    input:
+    tuple val(sample_id), path(raw_R1), path(raw_R2), path(trim_R1), path(trim_R2)
+
+    output:
+    tuple val(sample_id), path("readlen_${sample_id}.png"), emit: hist_plot
+
+    script:
+    """
+    #!/usr/bin/env python3
+    import gzip, os, sys
+    import matplotlib
+    matplotlib.use('Agg')
+    import matplotlib.pyplot as plt
+
+    def get_read_lengths(fastq):
+        lengths = []
+        if fastq.endswith('.gz'):
+            fh = gzip.open(fastq, 'rt')
+        else:
+            fh = open(fastq, 'r')
+        count = 0
+        for i, line in enumerate(fh):
+            if i % 4 == 1:  # sequence line
+                lengths.append(len(line.strip()))
+                count += 1
+                if count >= 10000:  # sample first 10k reads for speed
+                    break
+        fh.close()
+        return lengths
+
+    raw_lens = get_read_lengths("${raw_R1}")
+    trim_lens = get_read_lengths("${trim_R1}")
+
+    fig, ax = plt.subplots(figsize=(8, 5))
+    ax.hist(raw_lens, bins=50, alpha=0.6, color='steelblue', label='Raw')
+    ax.hist(trim_lens, bins=50, alpha=0.6, color='darkorange', label='Trimmed')
+    ax.set_xlabel('Read Length (bp)')
+    ax.set_ylabel('Count')
+    ax.set_title('Read Length Distribution: ${sample_id}')
+    ax.legend()
+    plt.tight_layout()
+    plt.savefig("readlen_${sample_id}.png", dpi=150)
+    plt.close()
+    """
+}
+
+// ---------- vSNP3 (M. bovis phylogenetic grouping) ----------
+process VSNP {
+    tag "$sample_id"
+    publishDir "${params.outdir}/vsnp", mode: 'copy'
+    errorStrategy 'ignore'
+    maxRetries 0
+    cpus   { params.global_cpus }
+    memory { params.global_memory }
+
+    input:
+    tuple val(sample_id), path(R1), path(R2)
+
+    output:
+    tuple val(sample_id), path("${sample_id}_vsnp_group.tsv"), optional: true, emit: vsnp_result
+    path "${sample_id}_vsnp_failed.txt", optional: true
+
+    when:
+    params.vsnp_ref != null
+
+    script:
+    """
+    #!/bin/bash
+
+    if [[ ! -s "${R1}" || ! -s "${R2}" ]]; then
+        echo "No reads for ${sample_id}" > ${sample_id}_vsnp_failed.txt
+        printf "Sample\\tvSNP_Group\\n" > ${sample_id}_vsnp_group.tsv
+        printf "${sample_id}\\tNA\\n" >> ${sample_id}_vsnp_group.tsv
+        exit 0
+    fi
+
+    # ============ STEP 1: Align reads and call SNPs ============
+    vsnp3_step1.py \\
+        -r1 ${R1} \\
+        -r2 ${R2} \\
+        -r ${params.vsnp_ref} \\
+        -n ${sample_id} \\
+        -o ${sample_id}_vsnp_out 2>&1 | tee vsnp_run_${sample_id}.log || true
+
+    # Find the VCF file produced by step1
+    VCF_FILE=\$(find ${sample_id}_vsnp_out -name "*_zc.vcf" -type f 2>/dev/null | head -1)
+
+    if [ -z "\$VCF_FILE" ]; then
+        echo "No VCF produced by step1" > ${sample_id}_vsnp_failed.txt
+        printf "Sample\\tvSNP_Group\\n" > ${sample_id}_vsnp_group.tsv
+        printf "${sample_id}\\tNA\\n" >> ${sample_id}_vsnp_group.tsv
+        exit 0
+    fi
+
+    echo "=== Found VCF: \$VCF_FILE ===" >> vsnp_run_${sample_id}.log
+
+    # ============ STEP 2: Group assignment using defining SNPs ============
+    # Copy VCF to a clean directory for step2
+    mkdir -p ${sample_id}_step2_input
+    cp "\$VCF_FILE" ${sample_id}_step2_input/
+
+    STEP2_ARGS="-wd ${sample_id}_step2_input -o ${sample_id}_step2_out --show_groups"
+
+    # Add defining SNPs file if provided
+    if [ -n "${params.vsnp_options}" ] && [ -f "${params.vsnp_options}" ]; then
+        STEP2_ARGS="\$STEP2_ARGS -s ${params.vsnp_options}"
+    fi
+
+    echo "=== Running: vsnp3_step2.py \$STEP2_ARGS ===" >> vsnp_run_${sample_id}.log
+    vsnp3_step2.py \$STEP2_ARGS 2>&1 | tee vsnp_step2_run_${sample_id}.log || true
+
+        # ============ Parse group assignment from step2 output ============
+    # The group name IS the subdirectory name inside step2_out
+    group="NA"
+    if [ -d ${sample_id}_step2_out ]; then
+        echo "=== Step2 output files ===" >> vsnp_run_${sample_id}.log
+        find ${sample_id}_step2_out -type f >> vsnp_run_${sample_id}.log 2>/dev/null
+
+        # Extract group names from subdirectories (ignore files and temp folders)
+        groups=\$(find ${sample_id}_step2_out -mindepth 1 -maxdepth 1 -type d -printf "%f\\n" 2>/dev/null | grep -v "step2_is_running" | sort -r | tr '\\n' ';')
+        # Remove trailing semicolon
+        groups="\${groups%;}"
+        
+        if [ -n "\$groups" ]; then
+            group="\$groups"
+        fi
+    else
+        echo "Step2 produced no output directory" >> vsnp_run_${sample_id}.log
+    fi
+
+    echo "=== Final group: \$group ===" >> vsnp_run_${sample_id}.log
+    printf "Sample\\tvSNP_Group\\n" > ${sample_id}_vsnp_group.tsv
+    printf "${sample_id}\\t\${group:-NA}\\n" >> ${sample_id}_vsnp_group.tsv
+    """
+}
+
+// ---------- Combine vSNP results into one table ----------
+process VSNP_SUMMARY {
+    publishDir "${params.outdir}/vsnp", mode: 'copy'
+    input:
+    path vsnp_tsvs
+    output:
+    path "vsnp_summary.tsv", emit: vsnp_summary
+    script:
+    """
+    #!/bin/bash
+    printf "Sample\\tvSNP_Group\\n" > vsnp_summary.tsv
+    for f in ${vsnp_tsvs}; do
+        if [ -f "\$f" ]; then
+            tail -n +2 "\$f" >> vsnp_summary.tsv
+        fi
+    done
+    """
+}
 
 
-// Full pipeline
 // Full pipeline
 workflow {
     log.info "Output dir       : ${params.outdir}"
@@ -793,8 +1206,26 @@ workflow {
     busco_collected = busco_out.busco_reports.collect()
     BUSCO_SUMMARY(busco_collected)
 
+    // Checkpoint report
+    retention_csvs_check = RETENTION_TRACK.out.retention_csv.collect()
+    quast_dirs_check = quast_out.quast_reports.collect()
+    CHECKPOINT_REPORT(retention_csvs_check, quast_dirs_check)
+    
+    // Assembly visualization (N50 + Sankey)
+    retention_csvs_viz = RETENTION_TRACK.out.retention_csv.collect()
+    quast_dirs_viz = quast_out.quast_reports.collect()
+    ASSEMBLY_VIZ(retention_csvs_viz, quast_dirs_viz)
+
+    // Read length histograms
+    readlen_input = raw_pairs.join(trimmed.trimmed_reads).map { id, raw_list, trim_R1, trim_R2 ->
+        tuple(id, raw_list[0], raw_list[1], trim_R1, trim_R2)
+    }
+    READ_LEN_HIST(readlen_input)
+
     // Kraken2 classification for routing
     kraken_out = KRAKEN2(assemblies.contigs)
+
+    vsnp_summary_file = channel.of()
 
     // Route samples to typing tools based on Kraken2 result
     if (params.kraken_db) {
@@ -804,6 +1235,13 @@ workflow {
         TB_PROFILER(tb_inputs)
         tb_mqc_reports = TB_PROFILER.out.tbprofiler_mqc.map { id, f -> f }.collect()
         TB_SUMMARY(tb_mqc_reports)
+        // vSNP grouping (runs on same M. bovis samples as TB-Profiler)
+        if (params.vsnp_ref) {
+            VSNP(tb_inputs)
+            vsnp_tsv = VSNP.out.vsnp_result.map { id, f -> f }.collect()
+            VSNP_SUMMARY(vsnp_tsv)
+            vsnp_summary_file = VSNP_SUMMARY.out.vsnp_summary.collect().flatten()
+        }
 
         sal_inputs = assemblies.contigs.join(kraken_out.kraken_reports)
                       .filter { id, c, rep -> decideOrganism(rep.toString()) == 'salmonella' }
@@ -855,15 +1293,32 @@ workflow {
     mlst_summary_file = MLST_SUMMARY.out.mlst_summary.collect().flatten()
     vir_summary_file  = VIRULENCE_SUMMARY.out.vir_summary.collect().flatten()
 
+    // Checkpoint report
+    checkpoint_tsv = CHECKPOINT_REPORT.out.checkpoint_tsv.collect().flatten()
+    checkpoint_img = CHECKPOINT_REPORT.out.checkpoint_plot.collect().flatten()
+
+    // Assembly visualization
+    n50_plot = ASSEMBLY_VIZ.out.n50_plot.collect().flatten()
+    sankey_plot = ASSEMBLY_VIZ.out.sankey_plot.collect().flatten()
+    assembly_summary = ASSEMBLY_VIZ.out.assembly_summary.collect().flatten()
+
+    // Read length histograms
+    readlen_plots = READ_LEN_HIST.out.hist_plot.map { id, f -> f }.collect().flatten()
+
+
     all_reports = raw_reports
         .mix(trimmed_reports, post_reports, quast_reports, busco_reports)
         .mix(retention_files)
         .mix(tb_summary_file)
+        .mix(vsnp_summary_file)
         .mix(sistr_summary_file)
         .mix(amr_summary_file)
         .mix(busco_summary_file)
         .mix(mlst_summary_file)
         .mix(vir_summary_file)
+        .mix(checkpoint_tsv, checkpoint_img)
+        .mix(n50_plot, sankey_plot, assembly_summary)
+        .mix(readlen_plots)
         .collect()
 
     MULTIQC(all_reports, file("${baseDir}/multiqc_config.yaml"))
@@ -989,4 +1444,20 @@ workflow test_VIRULENCEFINDER {
         .view()
     
     VIRULENCEFINDER(assemblies.contigs)
+}
+
+/*
+ * TEST: vSNP3 only
+ * Run with:
+ *   nextflow run . -entry test_VSNP --vsnp_ref /home/girouxeml/databases/vsnp/Mbovis_AF2122.fa -resume
+ */
+workflow test_VSNP {
+    raw_pairs = channel.fromFilePairs(params.reads, flat: false)
+    trimmed = FASTP(raw_pairs)
+    
+    trimmed.trimmed_reads
+        .map { it.toString() }
+        .view()
+    
+    VSNP(trimmed.trimmed_reads)
 }

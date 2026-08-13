@@ -4,6 +4,11 @@ custom_data:
     section_name: 'TB-Profiler Results'
     description: 'Lineage and drug-resistance calls from TB-Profiler v6.x'
     plot_type: 'table'
+  vsnp_summary:
+    file_format: 'tsv'
+    section_name: 'vSNP Group Assignment'
+    description: 'M. bovis phylogenetic group assignment from vSNP2'
+    plot_type: 'table'
   sistr2:
     file_format: 'tsv'
     section_name: 'SISTR2 Results'
@@ -42,10 +47,38 @@ custom_data:
     section_name: 'VirulenceFinder Results'
     description: 'Virulence gene detection summary'
     plot_type: 'table'
+  checkpoint_summary:
+    file_format: 'tsv'
+    section_name: 'Sample Checkpoints'
+    description: 'Pass/Fail status at 95% basecalled, 85% QC, 80% assembly thresholds'
+    plot_type: 'table'
+  checkpoint_image:
+    section_name: 'Checkpoint Plot'
+    description: 'Bar chart of retention at each checkpoint'
+    plot_type: 'image'
+  assembly_metrics_summary:
+    file_format: 'tsv'
+    section_name: 'Assembly Metrics'
+    description: 'N50, total length, and retention percentages per sample'
+    plot_type: 'table'
+  n50_plot:
+    section_name: 'N50 Bar Chart'
+    description: 'Assembly N50 continuity metric per sample'
+    plot_type: 'image'
+  sankey_plot:
+    section_name: 'Read Flow Sankey'
+    description: 'Flow of reads from Raw → Trimmed → Assembly'
+    plot_type: 'image'
+  readlen_hist:
+    section_name: 'Read Length Histograms'
+    description: 'Per-sample read length distribution before and after trimming'
+    plot_type: 'image'
 
 sp:
   tbprofiler:
     fn: 'tbprofiler_summary.tsv'
+  vsnp_summary:
+    fn: 'vsnp_summary.tsv'
   sistr2:
     fn: 'sistr2_summary.tsv'
   amrfinder:
@@ -62,3 +95,15 @@ sp:
     fn: 'mlst_typing_summary.tsv'
   virulencefinder_summary:
     fn: 'virulencefinder_summary.tsv'
+  checkpoint_summary:
+    fn: 'checkpoint_summary.tsv'
+  checkpoint_image:
+    fn: 'checkpoint_bar.png'
+  assembly_metrics_summary:
+    fn: 'assembly_metrics_summary.tsv'
+  n50_plot:
+    fn: 'n50_bar.png'
+  sankey_plot:
+    fn: 'sankey_retention.png'
+  readlen_hist:
+    fn: 'readlen_*.png'
