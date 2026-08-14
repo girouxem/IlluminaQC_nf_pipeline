@@ -1,6 +1,9 @@
 #!/usr/bin/env nextflow
 nextflow.enable.dsl=2
 
+params.assembly_mode  = params.assembly_mode  ?: 'isolate'
+params.run_nanopore   = params.run_nanopore   ?: false
+params.nanopore_input = params.nanopore_input ?: "data_nanopore/*"
 params.reads          = params.reads          ?: "data/*_{r1,R1,r2,R2}.fastq.gz"
 params.outdir         = params.outdir         ?: "${baseDir}/results"
 params.busco_lineage  = params.busco_lineage  ?: 'bacteria_odb10'
@@ -221,27 +224,40 @@ process SPADES {
     tag "$sample_id"
     cpus   { params.cpus_spades ?: params.global_cpus }
     memory { params.mem_spades  ?: params.global_memory }
+    
     input:
     tuple val(sample_id), path(R1), path(R2)
+    
     output:
     tuple val(sample_id), path("${sample_id}_contigs.fasta"), optional: true, emit: contigs
     path "${sample_id}_assembly_*txt", optional: true
+    
     script:
     """
     #!/bin/bash
     set -euo pipefail
+    
     if [[ ! -s "${R1}" || ! -s "${R2}" ]]; then
         echo "No trimmed data for ${sample_id}" > ${sample_id}_assembly_skipped.txt
         exit 0
     fi
+
+    # Determine assembly flag based on pipeline parameter
+    if [ "${params.assembly_mode}" == "meta" ]; then
+        ASM_FLAG="--meta"
+    else
+        ASM_FLAG="--isolate"
+    fi
+
     spades.py \\
         -1 "${R1}" \\
         -2 "${R2}" \\
-        --isolate \\
+        \$ASM_FLAG \\
         -o "${sample_id}_spades" \\
         --threads ${task.cpus} \\
         --memory ${(task.memory.toMega()/1024) as int} \\
         2>&1 | tee spades_run_${sample_id}.log
+
     if [[ -f "${sample_id}_spades/contigs.fasta" ]]; then
         cp "${sample_id}_spades/contigs.fasta" "${sample_id}_contigs.fasta"
     else
@@ -282,20 +298,31 @@ process FILTER_CONTIGS {
 
 
 // ---------- QUAST Assembly QC ----------
+// ---------- QUAST Assembly QC ----------
 process QUAST {
     tag "$sample_id"
     publishDir "${params.outdir}/quast", mode: 'copy'
+    errorStrategy 'ignore'
     cpus   { params.cpus_quast ?: params.global_cpus }
     memory { params.mem_quast  ?: params.global_memory }
     input:
     tuple val(sample_id), path(contigs)
     output:
-    path "${sample_id}_quast", emit: quast_reports
+    path "${sample_id}_quast", optional: true, emit: quast_reports
     script:
     """
-    quast.py ${contigs} -o ${sample_id}_quast -t ${task.cpus}
+    #!/bin/bash
+    # If assembly is empty or missing, skip QUAST
+    if [[ ! -s "${contigs}" ]]; then
+        mkdir -p ${sample_id}_quast
+        echo "Empty assembly for ${sample_id}" > ${sample_id}_quast/report.txt
+        exit 0
+    fi
+
+    quast.py ${contigs} -o ${sample_id}_quast -t ${task.cpus} --min-contig 100
     """
 }
+
 
 
 // ---------- BUSCO Completeness ----------
@@ -1175,155 +1202,324 @@ process VSNP_SUMMARY {
     done
     """
 }
+// ===================== NANOPORE BRANCH =====================
+
+// ---------- Dorado Basecaller ----------
+process DORADO {
+    tag "$sample_id"
+    publishDir "${params.outdir}/nanopore_basecalled", mode: 'copy'
+    errorStrategy 'ignore'
+    maxRetries 0
+    cpus   { params.global_cpus }
+    memory { params.global_memory }
+
+    input:
+    tuple val(sample_id), path(raw_signal)
+
+    output:
+    tuple val(sample_id), path("${sample_id}_basecalled.fastq.gz"), optional: true, emit: basecalled_fastq
+
+    script:
+    """
+    #!/bin/bash
+    # Dorado basecaller - supports both POD5 and FAST5
+    # Auto-detect format by extension
+    INPUT_DIR="${sample_id}_input"
+    mkdir -p \$INPUT_DIR
+    cp ${raw_signal} \$INPUT_DIR/
+
+    # Run basecaller with duplex mode and 5mC modification
+    dorado basecaller sup,duplex \$INPUT_DIR > ${sample_id}_basecalled.fastq 2> dorado_run.log || true
+    
+    # Also try demultiplexing if barcoded
+    if [ -s ${sample_id}_basecalled.fastq ]; then
+        gzip ${sample_id}_basecalled.fastq
+    else
+        echo "Dorado basecalling failed for ${sample_id}" > ${sample_id}_dorad_failed.txt
+        touch ${sample_id}_basecalled.fastq.gz
+    fi
+    """
+}
+
+// ---------- PoreChop (adapter trimming for ONT) ----------
+process PORECHOP {
+    tag "$sample_id"
+    publishDir "${params.outdir}/nanopore_trimmed", mode: 'copy'
+    errorStrategy 'ignore'
+    maxRetries 0
+    cpus   { params.global_cpus }
+    memory '8 GB'
+
+    input:
+    tuple val(sample_id), path(reads)
+
+    output:
+    tuple val(sample_id), path("${sample_id}_porechop.fastq.gz"), optional: true, emit: trimmed_fastq
+
+    script:
+    """
+    #!/bin/bash
+    # Decompress input if gzipped, PoreChop handles plain FASTQ better
+    if [[ "${reads}" == *.gz ]]; then
+        gunzip -c ${reads} > input.fastq
+        INPUT_FILE="input.fastq"
+    else
+        INPUT_FILE="${reads}"
+    fi
+
+    # Run PoreChop  no --format flag, let it auto-detect
+    porechop -i \$INPUT_FILE -o ${sample_id}_porechop.fastq --threads ${task.cpus} 2>&1 | tee porechop_run.log
+
+    if [ -s ${sample_id}_porechop.fastq ]; then
+        gzip ${sample_id}_porechop.fastq
+    else
+        echo "PoreChop failed for ${sample_id}" > ${sample_id}_porechop_failed.txt
+        touch ${sample_id}_porechop.fastq.gz
+    fi
+    """
+}
+
+
+// ---------- Flye (long-read assembly) ----------
+process FLYE {
+    tag "$sample_id"
+    publishDir "${params.outdir}/nanopore_assembly", mode: 'copy'
+    errorStrategy 'ignore'
+    maxRetries 0
+    cpus   { params.cpus_spades ?: params.global_cpus }
+    memory { params.mem_spades  ?: params.global_memory }
+
+    input:
+    tuple val(sample_id), path(reads)
+
+    output:
+    tuple val(sample_id), path("${sample_id}_flye_contigs.fasta"), optional: true, emit: contigs
+
+    script:
+    """
+    #!/bin/bash
+    # Always decompress to plain FASTQ
+    if [[ "${reads}" == *.gz ]]; then
+        gunzip -c ${reads} > ${sample_id}_input.fastq
+        INPUT_FILE="${sample_id}_input.fastq"
+    else
+        cp ${reads} ${sample_id}_input.fastq
+        INPUT_FILE="${sample_id}_input.fastq"
+    fi
+
+    # Check if file has content
+    if [ ! -s \$INPUT_FILE ]; then
+        echo "Empty input file for ${sample_id}" > ${sample_id}_flye_failed.txt
+        touch ${sample_id}_flye_contigs.fasta
+        exit 0
+    fi
+
+    # Determine assembly flag
+    if [ "${params.assembly_mode}" == "meta" ]; then
+        ASM_FLAG="--meta"
+    else
+        ASM_FLAG=""
+    fi
+
+    # Run Flye  use --nano-raw instead of --nano-hq for noisy metagenomic data
+    # Lower minimum read length to 200 (default is 1000)
+    flye --nano-raw \$INPUT_FILE \\
+         --out-dir ${sample_id}_flye_out \\
+         --threads ${task.cpus} \\
+         \$ASM_FLAG 2>&1 | tee flye_run.log || true
+
+    if [ -f ${sample_id}_flye_out/assembly.fasta ]; then
+        cp ${sample_id}_flye_out/assembly.fasta ${sample_id}_flye_contigs.fasta
+    else
+        echo "Flye assembly failed for ${sample_id}" > ${sample_id}_flye_failed.txt
+        touch ${sample_id}_flye_contigs.fasta
+    fi
+    """
+}
+
+
+// ---------- Medaka (polishing) ----------
+process MEDAKA {
+    tag "$sample_id"
+    publishDir "${params.outdir}/nanopore_polished", mode: 'copy'
+    errorStrategy 'ignore'
+    maxRetries 0
+    cpus   { params.global_cpus }
+    memory { params.global_memory }
+
+    input:
+    tuple val(sample_id), path(assembly), path(reads)
+
+    output:
+    tuple val(sample_id), path("${sample_id}_polished.fasta"), optional: true, emit: polished_contigs
+
+    script:
+    """
+    #!/bin/bash
+    # Decompress reads if gzipped
+    if [[ "${reads}" == *.gz ]]; then
+        gunzip -c ${reads} > ${sample_id}_reads.fastq
+        READS="${sample_id}_reads.fastq"
+    else
+        READS="${reads}"
+    fi
+
+    medaka_consensus -i \$READS \\
+                     -d ${assembly} \\
+                     -o ${sample_id}_medaka_out \\
+                     -t ${task.cpus} 2>&1 | tee medaka_run.log || true
+
+    if [ -f ${sample_id}_medaka_out/consensus.fasta ]; then
+        cp ${sample_id}_medaka_out/consensus.fasta ${sample_id}_polished.fasta
+    else
+        # If medaka fails, use the unpolished assembly
+        cp ${assembly} ${sample_id}_polished.fasta
+        echo "Medaka polishing failed for ${sample_id}  using unpolished assembly" > ${sample_id}_medaka_failed.txt
+    fi
+    """
+}
+
+// ---------- CheckM (bacterial completeness + contamination) ----------
+// ---------- CheckM (bacterial completeness + contamination) ----------
+process CHECKM {
+    tag "$sample_id"
+    publishDir "${params.outdir}/nanopore_checkm", mode: 'copy'
+    errorStrategy 'ignore'
+    maxRetries 0
+    cpus   { params.global_cpus }
+    memory { params.global_memory }
+
+    input:
+    tuple val(sample_id), path(contigs)
+
+    output:
+    tuple val(sample_id), path("${sample_id}_checkm.tsv"), optional: true, emit: checkm_result
+
+    script:
+    """
+    #!/bin/bash
+    if [[ ! -s "${contigs}" ]]; then
+        printf "Bin Id\\tMarker lineage\\t# genomes\\t# markers\\t# marker sets\\t0\\t1\\t2\\t3\\t4\\t5+\\tCompleteness\\tContamination\\tStrain heterogeneity\\n" > ${sample_id}_checkm.tsv
+        printf "${sample_id}\\tNA\\t0\\t0\\t0\\t0\\t0\\t0\\t0\\t0\\t0\\tNA\\tNA\\tNA\\n" >> ${sample_id}_checkm.tsv
+        exit 0
+    fi
+
+    mkdir -p ${sample_id}_checkm_input
+    cp ${contigs} ${sample_id}_checkm_input/
+    
+    checkm lineage_wf ${sample_id}_checkm_input ${sample_id}_checkm_out -t ${task.cpus} --file ${sample_id}_checkm.tsv 2>&1 | tee checkm_run.log || true
+
+    if [ ! -s ${sample_id}_checkm.tsv ]; then
+        printf "Bin Id\\tMarker lineage\\t# genomes\\t# markers\\t# marker sets\\t0\\t1\\t2\\t3\\t4\\t5+\\tCompleteness\\tContamination\\tStrain heterogeneity\\n" > ${sample_id}_checkm.tsv
+        printf "${sample_id}\\tNA\\t0\\t0\\t0\\t0\\t0\\t0\\t0\\t0\\t0\\tNA\\tNA\\tNA\\n" >> ${sample_id}_checkm.tsv
+    fi
+    """
+}
+
 
 
 // Full pipeline
 workflow {
-    log.info "Output dir       : ${params.outdir}"
-    log.info "Reads glob       : ${params.reads}"
-    log.info "BUSCO lineage    : ${params.busco_lineage}"
-    log.info "Min contig len   : ${params.min_contig_len}"
-    log.info "Global CPUs      : ${params.global_cpus}"
-    log.info "Global memory    : ${params.global_memory}"
+    if (params.run_nanopore) {
+        nanopore_pipeline()
+    } else {
+        log.info "Output dir       : ${params.outdir}"
+        log.info "Reads glob       : ${params.reads}"
+        log.info "BUSCO lineage    : ${params.busco_lineage}"
+        log.info "Min contig len   : ${params.min_contig_len}"
+        log.info "Global CPUs      : ${params.global_cpus}"
+        log.info "Global memory    : ${params.global_memory}"
 
-    raw_pairs = channel.fromFilePairs(params.reads, flat: false)
-    SANITY_CHECK(raw_pairs)
-    raw_fastqc = FASTQC_RAW(raw_pairs)
-    trimmed    = FASTP(raw_pairs)
-    trimmed_fastqc = FASTQC_TRIMMED(trimmed.trimmed_reads)
+        raw_pairs = channel.fromFilePairs(params.reads, flat: false)
+        SANITY_CHECK(raw_pairs)
+        raw_fastqc = FASTQC_RAW(raw_pairs)
+        trimmed    = FASTP(raw_pairs)
+        trimmed_fastqc = FASTQC_TRIMMED(trimmed.trimmed_reads)
 
-    // Retention tracking and visualization
-    retention_input = raw_pairs.join(trimmed.trimmed_reads)
-    RETENTION_TRACK(retention_input)
-    retention_csvs = RETENTION_TRACK.out.retention_csv.collect()
-    RETENTION_VIZ(retention_csvs)
+        retention_input = raw_pairs.join(trimmed.trimmed_reads)
+        RETENTION_TRACK(retention_input)
+        retention_csvs = RETENTION_TRACK.out.retention_csv.collect()
+        RETENTION_VIZ(retention_csvs)
 
-    // Assembly -> filter -> QUAST + BUSCO
-    assemblies = SPADES(trimmed.trimmed_reads)
-    filtered   = FILTER_CONTIGS(assemblies.contigs)
-    quast_out  = QUAST(assemblies.contigs)
-    busco_out  = BUSCO(filtered.filtered_contigs)
-    busco_collected = busco_out.busco_reports.collect()
-    BUSCO_SUMMARY(busco_collected)
+        assemblies = SPADES(trimmed.trimmed_reads)
+        filtered   = FILTER_CONTIGS(assemblies.contigs)
+        quast_out  = QUAST(assemblies.contigs)
+        busco_out  = BUSCO(filtered.filtered_contigs)
+        busco_collected = busco_out.busco_reports.collect()
+        BUSCO_SUMMARY(busco_collected)
 
-    // Checkpoint report
-    retention_csvs_check = RETENTION_TRACK.out.retention_csv.collect()
-    quast_dirs_check = quast_out.quast_reports.collect()
-    CHECKPOINT_REPORT(retention_csvs_check, quast_dirs_check)
-    
-    // Assembly visualization (N50 + Sankey)
-    retention_csvs_viz = RETENTION_TRACK.out.retention_csv.collect()
-    quast_dirs_viz = quast_out.quast_reports.collect()
-    ASSEMBLY_VIZ(retention_csvs_viz, quast_dirs_viz)
+        kraken_out = KRAKEN2(assemblies.contigs)
 
-    // Read length histograms
-    readlen_input = raw_pairs.join(trimmed.trimmed_reads).map { id, raw_list, trim_R1, trim_R2 ->
-        tuple(id, raw_list[0], raw_list[1], trim_R1, trim_R2)
-    }
-    READ_LEN_HIST(readlen_input)
+        vsnp_summary_file = channel.of()
 
-    // Kraken2 classification for routing
-    kraken_out = KRAKEN2(assemblies.contigs)
+        if (params.kraken_db) {
+            tb_inputs = trimmed.trimmed_reads.join(kraken_out.kraken_reports)
+                         .filter { id, r1, r2, rep -> decideOrganism(rep.toString()) == 'mbovis' }
+                         .map    { id, r1, r2, rep -> tuple(id, r1, r2) }
+            TB_PROFILER(tb_inputs)
+            tb_mqc_reports = TB_PROFILER.out.tbprofiler_mqc.map { id, f -> f }.collect()
+            TB_SUMMARY(tb_mqc_reports)
 
-    vsnp_summary_file = channel.of()
+            if (params.vsnp_ref) {
+                VSNP(tb_inputs)
+                vsnp_tsv = VSNP.out.vsnp_result.map { id, f -> f }.collect()
+                VSNP_SUMMARY(vsnp_tsv)
+                vsnp_summary_file = VSNP_SUMMARY.out.vsnp_summary.collect().flatten()
+            }
 
-    // Route samples to typing tools based on Kraken2 result
-    if (params.kraken_db) {
-        tb_inputs = trimmed.trimmed_reads.join(kraken_out.kraken_reports)
-                     .filter { id, r1, r2, rep -> decideOrganism(rep.toString()) == 'mbovis' }
-                     .map    { id, r1, r2, rep -> tuple(id, r1, r2) }
-        TB_PROFILER(tb_inputs)
-        tb_mqc_reports = TB_PROFILER.out.tbprofiler_mqc.map { id, f -> f }.collect()
-        TB_SUMMARY(tb_mqc_reports)
-        // vSNP grouping (runs on same M. bovis samples as TB-Profiler)
-        if (params.vsnp_ref) {
-            VSNP(tb_inputs)
-            vsnp_tsv = VSNP.out.vsnp_result.map { id, f -> f }.collect()
-            VSNP_SUMMARY(vsnp_tsv)
-            vsnp_summary_file = VSNP_SUMMARY.out.vsnp_summary.collect().flatten()
+            sal_inputs = assemblies.contigs.join(kraken_out.kraken_reports)
+                          .filter { id, c, rep -> decideOrganism(rep.toString()) == 'salmonella' }
+                          .map    { id, c, rep -> tuple(id, c) }
+            SISTR2(sal_inputs)
+            sistr_tsv = SISTR2.out.sistr2_tsv.map { id, f -> f }.collect()
+            SISTR_SUMMARY(sistr_tsv)
+
+            AMRFINDER(sal_inputs)
+            amr_reports = AMRFINDER.out.amr_tsv.map { id, f -> f }.collect()
+            AMR_SUMMARY(amr_reports)
+
+            lis_inputs = assemblies.contigs.join(kraken_out.kraken_reports)
+                          .filter { id, c, rep -> decideOrganism(rep.toString()) == 'listeria' }
+                          .map    { id, c, rep -> tuple(id, c) }
+            MLST(lis_inputs)
+            mlst_tsv = MLST.out.mlst_tsv.map { id, f -> f }.collect()
+            MLST_SUMMARY(mlst_tsv)
+
+            VIRULENCEFINDER(lis_inputs)
+            vir_jsons = VIRULENCEFINDER.out.vir_json.map { id, f -> f }.collect()
+            VIRULENCE_SUMMARY(vir_jsons)
         }
 
-        sal_inputs = assemblies.contigs.join(kraken_out.kraken_reports)
-                      .filter { id, c, rep -> decideOrganism(rep.toString()) == 'salmonella' }
-                      .map    { id, c, rep -> tuple(id, c) }
-        SISTR2(sal_inputs)
-        sistr_tsv = SISTR2.out.sistr2_tsv.map { id, f -> f }.collect()
-        SISTR_SUMMARY(sistr_tsv)
+        raw_reports     = raw_fastqc.fastqc_zip.map { id, f -> f }
+        trimmed_reports = trimmed.fastp_json.map { id, f -> f }
+        post_reports    = trimmed_fastqc.fastqc_zip_trim.map { id, f -> f }
+        quast_reports   = quast_out.quast_reports.map { p -> p }
+        busco_reports   = busco_out.busco_reports.map { p -> p }
 
-        AMRFINDER(sal_inputs)
-        amr_reports = AMRFINDER.out.amr_tsv.map { id, f -> f }.collect()
-        AMR_SUMMARY(amr_reports)
+        retention_files = RETENTION_VIZ.out.retention_files.collect().flatten()
+        tb_summary_file = TB_SUMMARY.out.tb_summary.collect().flatten()
+        sistr_summary_file = SISTR_SUMMARY.out.sistr_summary.collect().flatten()
+        amr_summary_file = AMR_SUMMARY.out.amr_summary.collect().flatten()
+        busco_summary_file = BUSCO_SUMMARY.out.busco_summary.collect().flatten()
+        mlst_summary_file = MLST_SUMMARY.out.mlst_summary.collect().flatten()
+        vir_summary_file  = VIRULENCE_SUMMARY.out.vir_summary.collect().flatten()
 
-        lis_inputs = assemblies.contigs.join(kraken_out.kraken_reports)
-                      .filter { id, c, rep -> decideOrganism(rep.toString()) == 'listeria' }
-                      .map    { id, c, rep -> tuple(id, c) }
-        MLST(lis_inputs)
-        mlst_tsv = MLST.out.mlst_tsv.map { id, f -> f }.collect()
-        MLST_SUMMARY(mlst_tsv)
+        all_reports = raw_reports
+            .mix(trimmed_reports, post_reports, quast_reports, busco_reports)
+            .mix(retention_files)
+            .mix(tb_summary_file)
+            .mix(vsnp_summary_file)
+            .mix(sistr_summary_file)
+            .mix(amr_summary_file)
+            .mix(busco_summary_file)
+            .mix(mlst_summary_file)
+            .mix(vir_summary_file)
+            .collect()
 
-        VIRULENCEFINDER(lis_inputs)
-        vir_jsons = VIRULENCEFINDER.out.vir_json.map { id, f -> f }.collect()
-        VIRULENCE_SUMMARY(vir_jsons)
-
+        MULTIQC(all_reports, file("${baseDir}/multiqc_config.yaml"))
     }
-
-    // ---- Safe QC channels + retention ----
-    raw_reports     = raw_fastqc.fastqc_zip.map { id, f -> f }
-    trimmed_reports = trimmed.fastp_json.map { id, f -> f }
-    post_reports    = trimmed_fastqc.fastqc_zip_trim.map { id, f -> f }
-    quast_reports   = quast_out.quast_reports.map { p -> p }
-    busco_reports   = busco_out.busco_reports.map { p -> p }
-
-    // Retention files
-    retention_files = RETENTION_VIZ.out.retention_files.collect().flatten()
-
-    // TB-Profiler summary table
-    tb_summary_file = TB_SUMMARY.out.tb_summary.collect().flatten()
-
-    // SISTR2 summary table
-    sistr_summary_file = SISTR_SUMMARY.out.sistr_summary.collect().flatten()
-
-    // AMRFinderPlus summary table
-    amr_summary_file = AMR_SUMMARY.out.amr_summary.collect().flatten()
-
-    // BUSCO summary table
-    busco_summary_file = BUSCO_SUMMARY.out.busco_summary.collect().flatten()
-
-    // MLST + VirulenceFinder summaries
-    mlst_summary_file = MLST_SUMMARY.out.mlst_summary.collect().flatten()
-    vir_summary_file  = VIRULENCE_SUMMARY.out.vir_summary.collect().flatten()
-
-    // Checkpoint report
-    checkpoint_tsv = CHECKPOINT_REPORT.out.checkpoint_tsv.collect().flatten()
-    checkpoint_img = CHECKPOINT_REPORT.out.checkpoint_plot.collect().flatten()
-
-    // Assembly visualization
-    n50_plot = ASSEMBLY_VIZ.out.n50_plot.collect().flatten()
-    sankey_plot = ASSEMBLY_VIZ.out.sankey_plot.collect().flatten()
-    assembly_summary = ASSEMBLY_VIZ.out.assembly_summary.collect().flatten()
-
-    // Read length histograms
-    readlen_plots = READ_LEN_HIST.out.hist_plot.map { id, f -> f }.collect().flatten()
-
-
-    all_reports = raw_reports
-        .mix(trimmed_reports, post_reports, quast_reports, busco_reports)
-        .mix(retention_files)
-        .mix(tb_summary_file)
-        .mix(vsnp_summary_file)
-        .mix(sistr_summary_file)
-        .mix(amr_summary_file)
-        .mix(busco_summary_file)
-        .mix(mlst_summary_file)
-        .mix(vir_summary_file)
-        .mix(checkpoint_tsv, checkpoint_img)
-        .mix(n50_plot, sankey_plot, assembly_summary)
-        .mix(readlen_plots)
-        .collect()
-
-    MULTIQC(all_reports, file("${baseDir}/multiqc_config.yaml"))
-
 }
+
 
 
 
@@ -1460,4 +1656,52 @@ workflow test_VSNP {
         .view()
     
     VSNP(trimmed.trimmed_reads)
+}
+/*
+ * NANOPORE PIPELINE
+ * Run with:
+ *   nextflow run . --run_nanopore true
+ *
+ * Input: data_nanopore/ directory with:
+ *   - *.pod5 files (raw signal  will be basecalled with Dorado)
+ *   - *.fast5 files (raw signal  will be basecalled with Dorado)
+ *   - *.fastq.gz files (already basecalled  skips Dorado)
+ */
+workflow nanopore_pipeline {
+    log.info "=== Running Nanopore Pipeline ==="
+    log.info "Nanopore input: ${params.nanopore_input}"
+    
+    // Create input channel from directory
+    // Each file or subdirectory becomes one sample
+    ont_inputs = channel.fromPath(params.nanopore_input, type: 'file')
+        .map { f -> tuple(f.baseName, f) }
+    
+    // Route based on file extension
+    // POD5/FAST5 → Dorado → PoreChop → Flye → Medaka → QUAST + CheckM
+    // FASTQ → PoreChop → Flye → Medaka → QUAST + CheckM
+    
+    needs_basecalling = ont_inputs.filter { id, f -> f.name.endsWith('.pod5') || f.name.endsWith('.fast5') }
+    already_basecalled = ont_inputs.filter { id, f -> f.name.endsWith('.fastq') || f.name.endsWith('.fastq.gz') }
+    
+    // Basecall raw signal
+    basecalled = DORADO(needs_basecalling)
+    
+    // Merge basecalled + already-FASTQ into one channel
+    all_ont_reads = basecalled.basecalled_fastq.mix(already_basecalled)
+    
+    // Trim adapters
+    trimmed_ont = PORECHOP(all_ont_reads)
+    
+    // COMMENTED OUT FOR PORECHOP TESTING
+    // Assemble
+    ont_assemblies = FLYE(trimmed_ont.trimmed_fastq)
+    
+    // Polish (needs both assembly + reads)
+    polished_inputs = ont_assemblies.contigs.join(trimmed_ont.trimmed_fastq)
+    polished_ont = MEDAKA(polished_inputs)
+    
+    quast_ont_out = QUAST(polished_ont.polished_contigs)
+    checkm_ont_out = CHECKM(polished_ont.polished_contigs)
+    
+    log.info "Nanopore pipeline complete. Check results/nanopore_assembly/ for contigs."
 }
