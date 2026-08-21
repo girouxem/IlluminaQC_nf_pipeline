@@ -1,0 +1,29 @@
+﻿sample_id,illumina_R1,illumina_R2,nanopore_file,Organism,Collection_Date,Contact,Source,Notes,Library_Type,Purpose
+GTA-L201,GTA-L201_S1_L001_R1_001.fastq.gz,GTA-L201_S1_L001_R2_001.fastq.gz,GTA-L201.fastq.gz,listeria,2026-07-15,Sohail Naushad,CFIA-Ottawa,metagenomic swab,metagenomic,test pipeline
+GTA-L258,GTA-L258_S2_L001_R1_001.fastq.gz,GTA-L258_S2_L001_R2_001.fastq.gz,GTA-L258.fastq.gz,listeria,2026-07-15,Sohail Naushad,CFIA-Ottawa,metagenomic swab,metagenomic,test pipeline
+GTA-L356,GTA-L356_S3_L001_R1_001.fastq.gz,GTA-L356_S3_L001_R2_001.fastq.gz,GTA-L356.fastq.gz,listeria,2026-07-15,Sohail Naushad,CFIA-Ottawa,metagenomic swab,metagenomic,test pipeline
+GTA-L407,GTA-L407_S4_L001_R1_001.fastq.gz,GTA-L407_S4_L001_R2_001.fastq.gz,GTA-L407.fastq.gz,listeria,2026-07-15,Sohail Naushad,CFIA-Ottawa,metagenomic swab,metagenomic,test pipeline
+GTA-L409,GTA-L409_S5_L001_R1_001.fastq.gz,GTA-L409_S5_L001_R2_001.fastq.gz,GTA-L409.fastq.gz,listeria,2026-07-15,Sohail Naushad,CFIA-Ottawa,metagenomic swab,metagenomic,test pipeline
+GTA-L411,GTA-L411_S6_L001_R1_001.fastq.gz,GTA-L411_S6_L001_R2_001.fastq.gz,GTA-L411.fastq.gz,listeria,2026-07-15,Sohail Naushad,CFIA-Ottawa,metagenomic swab,metagenomic,test pipeline
+OLF09-016,OLF09-016_S37_L001_R1.fastq.gz,OLF09-016_S37_L001_R2.fastq.gz,,,,,,,,test pipeline
+BD-318,BD-318_R1.fastq.gz,BD-318_R2.fastq.gz,,salmonella,2026-06-25,,CFIA-Ottawa,clinical isolate,,test pipeline
+1CT0-074,1CT0-074_R1.fastq.gz,1CT0-074_R2.fastq.gz,,,,,,,,test pipeline
+2CT0-081,2CT0-081_R1.fastq.gz,2CT0-081_R2.fastq.gz,,,,,,,,test pipeline
+3CT0-008,3CT0-008_R1.fastq.gz,3CT0-008_R2.fastq.gz,,,,,,,,test pipeline
+4CT0-015,4CT0-015_R1.fastq.gz,4CT0-015_R2.fastq.gz,,,,,,,,test pipeline
+5CT0-006,5CT0-006_R1.fastq.gz,5CT0-006_R2.fastq.gz,,,,,,,,test pipeline
+AA-309,AA-309_R1.fastq.gz,AA-309_R2.fastq.gz,,,,,,,,test pipeline
+BD-318,BD-318_R1.fastq.gz,BD-318_R2.fastq.gz,,,,,,,,test pipeline
+CN-Y-11,CN-Y-11_R1.fastq.gz,CN-Y-11_R2.fastq.gz,,,,,,,,test pipeline
+DA-294,DA-294_R1.fastq.gz,DA-294_R2.fastq.gz,,,,,,,,test pipeline
+FD-324,FD-324_R1.fastq.gz,FD-324_R2.fastq.gz,,,,,,,,test pipeline
+MBWGS003,MBWGS003_R1.fastq.gz,MBWGS003_R2.fastq.gz,,mbovis,2026-06-20,,CFIA-Ottawa,isolate,,test pipeline
+MBWGS001,MBWGS001_R1.fastq.gz,MBWGS001_R2.fastq.gz,,mbovis,2026-06-20,,CFIA-Ottawa,isolate,,test pipeline
+MBWGS002,MBWGS002_R1.fastq.gz,MBWGS002_R2.fastq.gz,,mbovis,2026-06-20,,CFIA-Ottawa,isolate,,test pipeline
+MBWGS003,MBWGS003_R1.fastq.gz,MBWGS003_R2.fastq.gz,,mbovis,2026-06-20,,CFIA-Ottawa,isolate,,test pipeline
+MBWGS004,MBWGS004_R1.fastq.gz,MBWGS004_R2.fastq.gz,,mbovis,2026-06-20,,CFIA-Ottawa,isolate,,test pipeline
+MBWGS005,MBWGS005_R1.fastq.gz,MBWGS005_R2.fastq.gz,,mbovis,2026-06-20,,CFIA-Ottawa,isolate,,test pipeline
+MBWGS006,MBWGS006_R1.fastq.gz,MBWGS006_R2.fastq.gz,,mbovis,2026-06-20,,CFIA-Ottawa,isolate,,test pipeline
+MBWGS007,MBWGS007_R1.fastq.gz,MBWGS007_R2.fastq.gz,,mbovis,2026-06-20,,CFIA-Ottawa,isolate,,test pipeline
+MBWGS008,MBWGS008_R1.fastq.gz,MBWGS008_R2.fastq.gz,,mbovis,2026-06-20,,CFIA-Ottawa,isolate,,test pipeline
+MBWGS009,MBWGS009_R1.fastq.gz,MBWGS009_R2.fastq.gz,,mbovis,2026-06-20,,CFIA-Ottawa,isolate,,test pipeline
