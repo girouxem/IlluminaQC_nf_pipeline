@@ -4,14 +4,35 @@ nextflow.enable.dsl=2
 // ===================== INCLUDE MODULES =====================
 include { SANITY_CHECK; FASTQC_RAW; FASTP; FASTQC_TRIMMED } from './modules/qc'
 include { RETENTION_TRACK; RETENTION_VIZ } from './modules/retention'
-include { SPADES; FILTER_CONTIGS; QUAST; BUSCO; BUSCO_SUMMARY } from './modules/assembly'
-include { KRAKEN2; TB_PROFILER; TB_SUMMARY; SISTR2; SISTR_SUMMARY; AMRFINDER; AMR_SUMMARY; MLST; MLST_SUMMARY; VIRULENCEFINDER; VIRULENCE_SUMMARY; VSNP; VSNP_SUMMARY } from './modules/typing'
-include { DORADO; PORECHOP; FLYE; MEDAKA; CHECKM } from './modules/nanopore'
+include { SPADES; FILTER_CONTIGS; BUSCO; BUSCO_SUMMARY } from './modules/assembly'
+
+// Import QUAST with original name and aliases for metadata_driven
+include { QUAST; QUAST as QUAST_ILL; QUAST as QUAST_ONT; QUAST as QUAST_HYB } from './modules/assembly'
+
+// Import KRAKEN2 with original name and aliases
+include { KRAKEN2; KRAKEN2 as KRAKEN2_ILL; KRAKEN2 as KRAKEN2_ONT; KRAKEN2 as KRAKEN2_HYB } from './modules/typing'
+
+// Import TB-Profiler and VSNP with original names and aliases
+include { TB_PROFILER; TB_SUMMARY; VSNP; VSNP_SUMMARY } from './modules/typing'
+include { TB_PROFILER as TB_PROFILER_ILL; TB_SUMMARY as TB_SUMMARY_ILL; VSNP as VSNP_ILL; VSNP_SUMMARY as VSNP_SUMMARY_ILL } from './modules/typing'
+include { TB_PROFILER as TB_PROFILER_ONT; TB_SUMMARY as TB_SUMMARY_ONT; VSNP as VSNP_ONT; VSNP_SUMMARY as VSNP_SUMMARY_ONT } from './modules/typing'
+include { TB_PROFILER as TB_PROFILER_HYB; TB_SUMMARY as TB_SUMMARY_HYB; VSNP as VSNP_HYB; VSNP_SUMMARY as VSNP_SUMMARY_HYB } from './modules/typing'
+
+// Import SISTR2, AMRFinder, MLST, VirulenceFinder with original names and aliases
+include { SISTR2; SISTR_SUMMARY; AMRFINDER; AMR_SUMMARY; MLST; MLST_SUMMARY; VIRULENCEFINDER; VIRULENCE_SUMMARY } from './modules/typing'
+include { SISTR2 as SISTR2_ILL; SISTR_SUMMARY as SISTR_SUMMARY_ILL; AMRFINDER as AMRFINDER_ILL; AMR_SUMMARY as AMR_SUMMARY_ILL; MLST as MLST_ILL; MLST_SUMMARY as MLST_SUMMARY_ILL; VIRULENCEFINDER as VIRULENCEFINDER_ILL; VIRULENCE_SUMMARY as VIRULENCE_SUMMARY_ILL } from './modules/typing'
+include { SISTR2 as SISTR2_ONT; SISTR_SUMMARY as SISTR_SUMMARY_ONT; AMRFINDER as AMRFINDER_ONT; AMR_SUMMARY as AMR_SUMMARY_ONT; MLST as MLST_ONT; MLST_SUMMARY as MLST_SUMMARY_ONT; VIRULENCEFINDER as VIRULENCEFINDER_ONT; VIRULENCE_SUMMARY as VIRULENCE_SUMMARY_ONT } from './modules/typing'
+include { SISTR2 as SISTR2_HYB; SISTR_SUMMARY as SISTR_SUMMARY_HYB; AMRFINDER as AMRFINDER_HYB; AMR_SUMMARY as AMR_SUMMARY_HYB; MLST as MLST_HYB; MLST_SUMMARY as MLST_SUMMARY_HYB; VIRULENCEFINDER as VIRULENCEFINDER_HYB; VIRULENCE_SUMMARY as VIRULENCE_SUMMARY_HYB } from './modules/typing'
+
+// Import Nanopore processes with original names and aliases for CHECKM
+include { DORADO; PORECHOP; FLYE; MEDAKA; CHECKM; CHECKM as CHECKM_ONT; CHECKM as CHECKM_HYB } from './modules/nanopore'
 include { UNICYCLER } from './modules/hybrid'
 include { CHECKPOINT_REPORT; ASSEMBLY_VIZ; READ_LEN_HIST } from './modules/viz'
 include { MULTIQC } from './modules/multiqc'
+include { LOAD_METADATA } from './modules/metadata'
 
 // ===================== PARAMETERS =====================
+params.test = params.test ?: null
 params.run_hybrid     = params.run_hybrid     ?: false
 params.assembly_mode  = params.assembly_mode  ?: 'isolate'
 params.run_nanopore   = params.run_nanopore   ?: false
@@ -35,11 +56,12 @@ params.mem_quast      = params.mem_quast      ?: null
 params.vsnp_ref       = params.vsnp_ref       ?: null
 params.vsnp_options   = params.vsnp_options   ?: null
 params.tbprofiler_db  = params.tbprofiler_db  ?: "/home/girouxeml/databases/tbprofiler/tbdb"
+params.samples_csv    = params.samples_csv    ?: null
 
 // ===================== HELPER FUNCTIONS =====================
 def decideOrganism(String kraken_report_path) {
     def lines = new File(kraken_report_path).readLines()
-    def species = lines.find { it.contains("\tS\t") } ?: ''
+    def species = lines.find { line -> line.contains("\tS\t") } ?: ''
     if (species.contains("Mycobacterium")) return "mbovis"
     if (species.contains("Salmonella"))    return "salmonella"
     if (species.contains("Listeria"))      return "listeria"
@@ -47,13 +69,44 @@ def decideOrganism(String kraken_report_path) {
     return "bacteria"
 }
 
-// ===================== MAIN WORKFLOW =====================
+// ===================== MAIN WORKFLOW ROUTER =====================
 workflow {
-    if (params.run_nanopore) {
+    if (params.test == "metadata") {
+        test_LOAD_METADATA()
+    } else if (params.test == "sanity_check") {
+        test_SANITY_CHECK()
+    } else if (params.test == "fastqc_raw") {
+        test_FASTQC_RAW()
+    } else if (params.test == "fastp") {
+        test_FASTP()
+    } else if (params.test == "fastqc_trimmed") {
+        test_FASTQC_TRIMMED()
+    } else if (params.test == "retention") {
+        test_RETENTION_TRACK()
+    } else if (params.test == "spades") {
+        test_SPADES()
+    } else if (params.test == "quast") {
+        test_QUAST()
+    } else if (params.test == "busco") {
+        test_BUSCO()
+    } else if (params.test == "kraken2") {
+        test_KRAKEN2()
+    } else if (params.test == "tbprofiler") {
+        test_TB_PROFILER()
+    } else if (params.test == "kraken2_routing") {
+        test_KRAKEN2_ROUTING()
+    } else if (params.test == "virulencefinder") {
+        test_VIRULENCEFINDER()
+    } else if (params.test == "vsnp") {
+        test_VSNP()
+    } else if (params.run_nanopore) {
         nanopore_pipeline()
     } else if (params.run_hybrid) {
         hybrid_assembly()
+    } else if (params.samples_csv) {
+        metadata_driven()
     } else {
+        // Standard Illumina Pipeline
         log.info "Output dir       : ${params.outdir}"
         log.info "Reads glob       : ${params.reads}"
         log.info "BUSCO lineage    : ${params.busco_lineage}"
@@ -85,45 +138,45 @@ workflow {
 
         if (params.kraken_db) {
             tb_inputs = trimmed.trimmed_reads.join(kraken_out.kraken_reports)
-                         .filter { id, r1, r2, rep -> decideOrganism(rep.toString()) == 'mbovis' }
-                         .map    { id, r1, r2, rep -> tuple(id, r1, r2) }
+                         .filter { _id, _r1, _r2, rep -> decideOrganism(rep.toString()) == 'mbovis' }
+                         .map    { id, r1, r2, _rep -> tuple(id, r1, r2) }
             TB_PROFILER(tb_inputs)
-            tb_mqc_reports = TB_PROFILER.out.tbprofiler_mqc.map { id, f -> f }.collect()
+            tb_mqc_reports = TB_PROFILER.out.tbprofiler_mqc.map { _id, f -> f }.collect()
             TB_SUMMARY(tb_mqc_reports)
 
             if (params.vsnp_ref) {
                 VSNP(tb_inputs)
-                vsnp_tsv = VSNP.out.vsnp_result.map { id, f -> f }.collect()
+                vsnp_tsv = VSNP.out.vsnp_result.map { _id, f -> f }.collect()
                 VSNP_SUMMARY(vsnp_tsv)
                 vsnp_summary_file = VSNP_SUMMARY.out.vsnp_summary.collect().flatten()
             }
 
             sal_inputs = assemblies.contigs.join(kraken_out.kraken_reports)
-                          .filter { id, c, rep -> decideOrganism(rep.toString()) == 'salmonella' }
-                          .map    { id, c, rep -> tuple(id, c) }
+                          .filter { _id, _c, rep -> decideOrganism(rep.toString()) == 'salmonella' }
+                          .map    { id, c, _rep -> tuple(id, c) }
             SISTR2(sal_inputs)
-            sistr_tsv = SISTR2.out.sistr2_tsv.map { id, f -> f }.collect()
+            sistr_tsv = SISTR2.out.sistr2_tsv.map { _id, f -> f }.collect()
             SISTR_SUMMARY(sistr_tsv)
 
             AMRFINDER(sal_inputs)
-            amr_reports = AMRFINDER.out.amr_tsv.map { id, f -> f }.collect()
+            amr_reports = AMRFINDER.out.amr_tsv.map { _id, f -> f }.collect()
             AMR_SUMMARY(amr_reports)
 
             lis_inputs = assemblies.contigs.join(kraken_out.kraken_reports)
-                          .filter { id, c, rep -> decideOrganism(rep.toString()) == 'listeria' }
-                          .map    { id, c, rep -> tuple(id, c) }
+                          .filter { _id, _c, rep -> decideOrganism(rep.toString()) == 'listeria' }
+                          .map    { id, c, _rep -> tuple(id, c) }
             MLST(lis_inputs)
-            mlst_tsv = MLST.out.mlst_tsv.map { id, f -> f }.collect()
+            mlst_tsv = MLST.out.mlst_tsv.map { _id, f -> f }.collect()
             MLST_SUMMARY(mlst_tsv)
 
             VIRULENCEFINDER(lis_inputs)
-            vir_jsons = VIRULENCEFINDER.out.vir_json.map { id, f -> f }.collect()
+            vir_jsons = VIRULENCEFINDER.out.vir_json.map { _id, f -> f }.collect()
             VIRULENCE_SUMMARY(vir_jsons)
         }
 
-        raw_reports     = raw_fastqc.fastqc_zip.map { id, f -> f }
-        trimmed_reports = trimmed.fastp_json.map { id, f -> f }
-        post_reports    = trimmed_fastqc.fastqc_zip_trim.map { id, f -> f }
+        raw_reports     = raw_fastqc.fastqc_zip.map { _id, f -> f }
+        trimmed_reports = trimmed.fastp_json.map { _id, f -> f }
+        post_reports    = trimmed_fastqc.fastqc_zip_trim.map { _id, f -> f }
         quast_reports   = quast_out.quast_reports.map { p -> p }
         busco_reports   = busco_out.busco_reports.map { p -> p }
 
@@ -159,8 +212,8 @@ workflow nanopore_pipeline {
     ont_inputs = channel.fromPath(params.nanopore_input, type: 'file')
         .map { f -> tuple(f.baseName.replaceFirst(/\.(fastq|fq)(\.gz)?$/, ''), f) }
 
-    needs_basecalling = ont_inputs.filter { id, f -> f.name.endsWith('.pod5') || f.name.endsWith('.fast5') }
-    already_basecalled = ont_inputs.filter { id, f -> f.name.endsWith('.fastq') || f.name.endsWith('.fastq.gz') }
+    needs_basecalling = ont_inputs.filter { _id, f -> f.name.endsWith('.pod5') || f.name.endsWith('.fast5') }
+    already_basecalled = ont_inputs.filter { _id, f -> f.name.endsWith('.fastq') || f.name.endsWith('.fastq.gz') }
     
     basecalled = DORADO(needs_basecalling)
     all_ont_reads = basecalled.basecalled_fastq.mix(already_basecalled)
@@ -172,7 +225,7 @@ workflow nanopore_pipeline {
     polished_ont = MEDAKA(polished_inputs)
     
     quast_ont_out = QUAST(polished_ont.polished_contigs)
-    checkm_ont_out = CHECKM(polished_ont.polished_contigs)
+    _checkm_ont_out = CHECKM(polished_ont.polished_contigs)
     
     kraken_ont_out = KRAKEN2(polished_ont.polished_contigs)
     
@@ -185,43 +238,43 @@ workflow nanopore_pipeline {
     
     if (params.kraken_db) {
         tb_ont_inputs = trimmed_ont.trimmed_fastq.join(kraken_ont_out.kraken_reports)
-                         .filter { id, fq, rep -> decideOrganism(rep.toString()) == 'mbovis' }
-                         .map    { id, fq, rep -> tuple(id, fq, fq) }
+                         .filter { _id, _fq, rep -> decideOrganism(rep.toString()) == 'mbovis' }
+                         .map    { id, fq, _rep -> tuple(id, fq, fq) }
         TB_PROFILER(tb_ont_inputs)
-        tb_mqc_reports = TB_PROFILER.out.tbprofiler_mqc.map { id, f -> f }.collect()
+        tb_mqc_reports = TB_PROFILER.out.tbprofiler_mqc.map { _id, f -> f }.collect()
         TB_SUMMARY(tb_mqc_reports)
         tb_summary_ch = TB_SUMMARY.out.tb_summary
         
         if (params.vsnp_ref) {
             VSNP(tb_ont_inputs)
-            vsnp_tsv = VSNP.out.vsnp_result.map { id, f -> f }.collect()
+            vsnp_tsv = VSNP.out.vsnp_result.map { _id, f -> f }.collect()
             VSNP_SUMMARY(vsnp_tsv)
             vsnp_summary_ch = VSNP_SUMMARY.out.vsnp_summary.collect().flatten()
         }
         
         sal_ont_inputs = polished_ont.polished_contigs.join(kraken_ont_out.kraken_reports)
-                          .filter { id, c, rep -> decideOrganism(rep.toString()) == 'salmonella' }
-                          .map    { id, c, rep -> tuple(id, c) }
+                          .filter { _id, _c, rep -> decideOrganism(rep.toString()) == 'salmonella' }
+                          .map    { id, c, _rep -> tuple(id, c) }
         SISTR2(sal_ont_inputs)
-        sistr_tsv = SISTR2.out.sistr2_tsv.map { id, f -> f }.collect()
+        sistr_tsv = SISTR2.out.sistr2_tsv.map { _id, f -> f }.collect()
         SISTR_SUMMARY(sistr_tsv)
         sistr_summary_ch = SISTR_SUMMARY.out.sistr_summary
         
         AMRFINDER(sal_ont_inputs)
-        amr_reports = AMRFINDER.out.amr_tsv.map { id, f -> f }.collect()
+        amr_reports = AMRFINDER.out.amr_tsv.map { _id, f -> f }.collect()
         AMR_SUMMARY(amr_reports)
         amr_summary_ch = AMR_SUMMARY.out.amr_summary
         
         lis_ont_inputs = polished_ont.polished_contigs.join(kraken_ont_out.kraken_reports)
-                          .filter { id, c, rep -> decideOrganism(rep.toString()) == 'listeria' }
-                          .map    { id, c, rep -> tuple(id, c) }
+                          .filter { _id, _c, rep -> decideOrganism(rep.toString()) == 'listeria' }
+                          .map    { id, c, _rep -> tuple(id, c) }
         MLST(lis_ont_inputs)
-        mlst_tsv = MLST.out.mlst_tsv.map { id, f -> f }.collect()
+        mlst_tsv = MLST.out.mlst_tsv.map { _id, f -> f }.collect()
         MLST_SUMMARY(mlst_tsv)
         mlst_summary_ch = MLST_SUMMARY.out.mlst_summary
         
         VIRULENCEFINDER(lis_ont_inputs)
-        vir_jsons = VIRULENCEFINDER.out.vir_json.map { id, f -> f }.collect()
+        vir_jsons = VIRULENCEFINDER.out.vir_json.map { _id, f -> f }.collect()
         VIRULENCE_SUMMARY(vir_jsons)
         vir_summary_ch = VIRULENCE_SUMMARY.out.vir_summary
     }
@@ -247,20 +300,20 @@ workflow hybrid_assembly {
     ont_inputs = channel.fromPath(params.nanopore_input, type: 'file')
         .map { f -> tuple(f.baseName.replaceFirst(/\.(fastq|fq)(\.gz)?$/, ''), f) }
 
-    needs_basecalling = ont_inputs.filter { id, f -> f.name.endsWith('.pod5') || f.name.endsWith('.fast5') }
-    already_basecalled = ont_inputs.filter { id, f -> f.name.endsWith('.fastq') || f.name.endsWith('.fastq.gz') }
+    needs_basecalling = ont_inputs.filter { _id, f -> f.name.endsWith('.pod5') || f.name.endsWith('.fast5') }
+    already_basecalled = ont_inputs.filter { _id, f -> f.name.endsWith('.fastq') || f.name.endsWith('.fastq.gz') }
     basecalled = DORADO(needs_basecalling)
     all_ont_reads = basecalled.basecalled_fastq.mix(already_basecalled)
     ont_trimmed = PORECHOP(all_ont_reads)
     
     hybrid_inputs = illumina_trimmed.trimmed_reads.join(ont_trimmed.trimmed_fastq)
     
-    hybrid_inputs.map { id, r1, r2, ont -> "HYBRID: ${id} has Illumina + Nanopore" }.view()
+    hybrid_inputs.map { id, _r1, _r2, _ont -> "HYBRID: ${id} has Illumina + Nanopore" }.view()
     
     hybrid_assemblies = UNICYCLER(hybrid_inputs)
     
-    quast_hybrid_out = QUAST(hybrid_assemblies.hybrid_contigs)
-    checkm_hybrid_out = CHECKM(hybrid_assemblies.hybrid_contigs)
+    quast_hybrid_out = QUAST_HYB(hybrid_assemblies.hybrid_contigs)
+    _checkm_hybrid_out = CHECKM(hybrid_assemblies.hybrid_contigs)
     
     kraken_hybrid_out = KRAKEN2(hybrid_assemblies.hybrid_contigs)
     
@@ -273,43 +326,43 @@ workflow hybrid_assembly {
     
     if (params.kraken_db) {
         tb_inputs = hybrid_inputs.join(kraken_hybrid_out.kraken_reports)
-                     .filter { id, r1, r2, ont, rep -> decideOrganism(rep.toString()) == 'mbovis' }
-                     .map    { id, r1, r2, ont, rep -> tuple(id, r1, r2) }
+                     .filter { _id, _r1, _r2, _ont, rep -> decideOrganism(rep.toString()) == 'mbovis' }
+                     .map    { id, r1, r2, _ont, _rep -> tuple(id, r1, r2) }
         TB_PROFILER(tb_inputs)
-        tb_mqc = TB_PROFILER.out.tbprofiler_mqc.map { id, f -> f }.collect()
+        tb_mqc = TB_PROFILER.out.tbprofiler_mqc.map { _id, f -> f }.collect()
         TB_SUMMARY(tb_mqc)
         tb_summary_ch = TB_SUMMARY.out.tb_summary
         
         if (params.vsnp_ref) {
             VSNP(tb_inputs)
-            vsnp_tsv = VSNP.out.vsnp_result.map { id, f -> f }.collect()
+            vsnp_tsv = VSNP.out.vsnp_result.map { _id, f -> f }.collect()
             VSNP_SUMMARY(vsnp_tsv)
             vsnp_summary_ch = VSNP_SUMMARY.out.vsnp_summary.collect().flatten()
         }
         
         sal_inputs = hybrid_assemblies.hybrid_contigs.join(kraken_hybrid_out.kraken_reports)
-                      .filter { id, c, rep -> decideOrganism(rep.toString()) == 'salmonella' }
-                      .map    { id, c, rep -> tuple(id, c) }
+                      .filter { _id, _c, rep -> decideOrganism(rep.toString()) == 'salmonella' }
+                      .map    { id, c, _rep -> tuple(id, c) }
         SISTR2(sal_inputs)
-        sistr_tsv = SISTR2.out.sistr2_tsv.map { id, f -> f }.collect()
+        sistr_tsv = SISTR2.out.sistr2_tsv.map { _id, f -> f }.collect()
         SISTR_SUMMARY(sistr_tsv)
         sistr_summary_ch = SISTR_SUMMARY.out.sistr_summary
         
         AMRFINDER(sal_inputs)
-        amr_reports = AMRFINDER.out.amr_tsv.map { id, f -> f }.collect()
+        amr_reports = AMRFINDER.out.amr_tsv.map { _id, f -> f }.collect()
         AMR_SUMMARY(amr_reports)
         amr_summary_ch = AMR_SUMMARY.out.amr_summary
         
         lis_inputs = hybrid_assemblies.hybrid_contigs.join(kraken_hybrid_out.kraken_reports)
-                      .filter { id, c, rep -> decideOrganism(rep.toString()) == 'listeria' }
-                      .map    { id, c, rep -> tuple(id, c) }
+                      .filter { _id, _c, rep -> decideOrganism(rep.toString()) == 'listeria' }
+                      .map    { id, c, _rep -> tuple(id, c) }
         MLST(lis_inputs)
-        mlst_tsv = MLST.out.mlst_tsv.map { id, f -> f }.collect()
+        mlst_tsv = MLST.out.mlst_tsv.map { _id, f -> f }.collect()
         MLST_SUMMARY(mlst_tsv)
         mlst_summary_ch = MLST_SUMMARY.out.mlst_summary
         
         VIRULENCEFINDER(lis_inputs)
-        vir_jsons = VIRULENCEFINDER.out.vir_json.map { id, f -> f }.collect()
+        vir_jsons = VIRULENCEFINDER.out.vir_json.map { _id, f -> f }.collect()
         VIRULENCE_SUMMARY(vir_jsons)
         vir_summary_ch = VIRULENCE_SUMMARY.out.vir_summary
     }
@@ -325,7 +378,256 @@ workflow hybrid_assembly {
     log.info "Hybrid assembly pipeline complete. Check results/hybrid_assembly/ for contigs."
 }
 
+// ===================== METADATA DRIVEN WORKFLOW =====================
+workflow metadata_driven {
+    log.info "=== Running Metadata-Driven Pipeline ==="
+    log.info "Samples CSV: ${params.samples_csv}"
+    
+    // 1. Load metadata and capture the output channels
+    metadata_out = LOAD_METADATA(file(params.samples_csv))
+    
+    // 2. Parse the channels TSV directly from the process output channel
+    sample_channels = metadata_out.channels_tsv
+        .splitCsv(sep: '\t', header: true)
+        .map { row -> tuple(row.sample_id, row.data_type, row.organism, 
+                           row.illumina_r1, row.illumina_r2, row.nanopore) }
+    
+    // 3. Route based on data_type
+    illumina_samples = sample_channels.filter { _id, type, _org, r1, r2, _ont -> 
+        type == "illumina" && r1 && r2 
+    }
+    nanopore_samples = sample_channels.filter { _id, type, _org, _r1, _r2, ont -> 
+        type == "nanopore" && ont 
+    }
+    hybrid_samples = sample_channels.filter { _id, type, _org, _r1, _r2, _ont -> 
+        type == "hybrid" 
+    }
+
+    // ---- ILLUMINA BRANCH ----
+    illumina_input = illumina_samples.map { id, _type, _org, r1, r2, _ont -> 
+        tuple(id, [file(r1), file(r2)]) 
+    }
+    illumina_trimmed = FASTP(illumina_input)
+
+    illumina_assemblies = SPADES(illumina_trimmed.trimmed_reads)
+    illumina_filtered   = FILTER_CONTIGS(illumina_assemblies.contigs)
+    illumina_quast_out  = QUAST_ILL(illumina_assemblies.contigs)
+    illumina_busco_out  = BUSCO(illumina_filtered.filtered_contigs)
+    illumina_busco_collected = illumina_busco_out.busco_reports.collect()
+    BUSCO_SUMMARY(illumina_busco_collected)
+
+    // ---- NANOPORE BRANCH ----
+    ont_input = nanopore_samples.map { id, _type, _org, _r1, _r2, ont -> 
+        tuple(id, file(ont)) 
+    }
+    ont_trimmed = PORECHOP(ont_input)
+    ont_assemblies = FLYE(ont_trimmed.trimmed_fastq)
+    
+    ont_polished_inputs = ont_assemblies.contigs.join(ont_trimmed.trimmed_fastq)
+    ont_polished = MEDAKA(ont_polished_inputs)
+    
+    ont_quast_out = QUAST_ONT(ont_polished.polished_contigs)
+    _ont_checkm_out = CHECKM_ONT(ont_polished.polished_contigs)
+
+    // ---- HYBRID BRANCH ----
+    hybrid_input = hybrid_samples.map { id, _type, _org, r1, r2, ont -> 
+        tuple(id, file(r1), file(r2), file(ont)) 
+    }
+    hybrid_assemblies = UNICYCLER(hybrid_input)
+    
+    hybrid_quast_out = QUAST_HYB(hybrid_assemblies.hybrid_contigs)
+    _hybrid_checkm_out = CHECKM_HYB(hybrid_assemblies.hybrid_contigs)
+
+    // ---- Kraken2 classification for all assemblies ----
+    kraken_illumina = KRAKEN2_ILL(illumina_assemblies.contigs)
+    kraken_ont      = KRAKEN2_ONT(ont_polished.polished_contigs)
+    kraken_hybrid   = KRAKEN2_HYB(hybrid_assemblies.hybrid_contigs)
+
+    // ---- Initialize empty typing channels ----
+    tb_summary_ch    = channel.of()
+    vsnp_summary_ch  = channel.of()
+    sistr_summary_ch = channel.of()
+    amr_summary_ch   = channel.of()
+    mlst_summary_ch  = channel.of()
+    vir_summary_ch   = channel.of()
+
+    // ---- Route Illumina assemblies to typing tools ----
+    if (params.kraken_db) {
+        tb_ill_inputs = illumina_trimmed.trimmed_reads.join(kraken_illumina.kraken_reports)
+                         .filter { _id, _r1, _r2, rep -> decideOrganism(rep.toString()) == 'mbovis' }
+                         .map    { id, r1, r2, _rep -> tuple(id, r1, r2) }
+        TB_PROFILER_ILL(tb_ill_inputs)
+        tb_mqc = TB_PROFILER_ILL.out.tbprofiler_mqc.map { _id, f -> f }.collect()
+        TB_SUMMARY_ILL(tb_mqc)
+        tb_summary_ch = TB_SUMMARY_ILL.out.tb_summary
+        
+        if (params.vsnp_ref) {
+            VSNP_ILL(tb_ill_inputs)
+            vsnp_tsv = VSNP_ILL.out.vsnp_result.map { _id, f -> f }.collect()
+            VSNP_SUMMARY_ILL(vsnp_tsv)
+            vsnp_summary_ch = VSNP_SUMMARY_ILL.out.vsnp_summary.collect().flatten()
+        }
+
+        sal_ill_inputs = illumina_assemblies.contigs.join(kraken_illumina.kraken_reports)
+                          .filter { _id, _c, rep -> decideOrganism(rep.toString()) == 'salmonella' }
+                          .map    { id, c, _rep -> tuple(id, c) }
+        SISTR2_ILL(sal_ill_inputs)
+        sistr_tsv = SISTR2_ILL.out.sistr2_tsv.map { _id, f -> f }.collect()
+        SISTR_SUMMARY_ILL(sistr_tsv)
+        sistr_summary_ch = SISTR_SUMMARY_ILL.out.sistr_summary
+        
+        AMRFINDER_ILL(sal_ill_inputs)
+        amr_reports = AMRFINDER_ILL.out.amr_tsv.map { _id, f -> f }.collect()
+        AMR_SUMMARY_ILL(amr_reports)
+        amr_summary_ch = AMR_SUMMARY_ILL.out.amr_summary
+
+        lis_ill_inputs = illumina_assemblies.contigs.join(kraken_illumina.kraken_reports)
+                          .filter { _id, _c, rep -> decideOrganism(rep.toString()) == 'listeria' }
+                          .map    { id, c, _rep -> tuple(id, c) }
+        MLST_ILL(lis_ill_inputs)
+        mlst_tsv = MLST_ILL.out.mlst_tsv.map { _id, f -> f }.collect()
+        MLST_SUMMARY_ILL(mlst_tsv)
+        mlst_summary_ch = MLST_SUMMARY_ILL.out.mlst_summary
+        
+        VIRULENCEFINDER_ILL(lis_ill_inputs)
+        vir_jsons = VIRULENCEFINDER_ILL.out.vir_json.map { _id, f -> f }.collect()
+        VIRULENCE_SUMMARY_ILL(vir_jsons)
+        vir_summary_ch = VIRULENCE_SUMMARY_ILL.out.vir_summary
+    }
+
+    // ---- Route ONT assemblies to typing tools ----
+    if (params.kraken_db) {
+        tb_ont_inputs = ont_trimmed.trimmed_fastq.join(kraken_ont.kraken_reports)
+                         .filter { _id, _fq, rep -> decideOrganism(rep.toString()) == 'mbovis' }
+                         .map    { id, fq, _rep -> tuple(id, fq, fq) }
+        TB_PROFILER_ONT(tb_ont_inputs)
+        tb_ont_mqc = TB_PROFILER_ONT.out.tbprofiler_mqc.map { _id, f -> f }.collect()
+        TB_SUMMARY_ONT(tb_ont_mqc)
+        tb_summary_ch = TB_SUMMARY_ONT.out.tb_summary
+        
+        if (params.vsnp_ref) {
+            VSNP_ONT(tb_ont_inputs)
+            vsnp_ont_tsv = VSNP_ONT.out.vsnp_result.map { _id, f -> f }.collect()
+            VSNP_SUMMARY_ONT(vsnp_ont_tsv)
+            vsnp_summary_ch = VSNP_SUMMARY_ONT.out.vsnp_summary.collect().flatten()
+        }
+
+        sal_ont_inputs = ont_polished.polished_contigs.join(kraken_ont.kraken_reports)
+                          .filter { _id, _c, rep -> decideOrganism(rep.toString()) == 'salmonella' }
+                          .map    { id, c, _rep -> tuple(id, c) }
+        SISTR2_ONT(sal_ont_inputs)
+        sistr_ont_tsv = SISTR2_ONT.out.sistr2_tsv.map { _id, f -> f }.collect()
+        SISTR_SUMMARY_ONT(sistr_ont_tsv)
+        sistr_summary_ch = SISTR_SUMMARY_ONT.out.sistr_summary
+        
+        AMRFINDER_ONT(sal_ont_inputs)
+        amr_ont_reports = AMRFINDER_ONT.out.amr_tsv.map { _id, f -> f }.collect()
+        AMR_SUMMARY_ONT(amr_ont_reports)
+        amr_summary_ch = AMR_SUMMARY_ONT.out.amr_summary
+
+        lis_ont_inputs = ont_polished.polished_contigs.join(kraken_ont.kraken_reports)
+                          .filter { _id, _c, rep -> decideOrganism(rep.toString()) == 'listeria' }
+                          .map    { id, c, _rep -> tuple(id, c) }
+        MLST_ONT(lis_ont_inputs)
+        mlst_ont_tsv = MLST_ONT.out.mlst_tsv.map { _id, f -> f }.collect()
+        MLST_SUMMARY_ONT(mlst_ont_tsv)
+        mlst_summary_ch = MLST_SUMMARY_ONT.out.mlst_summary
+        
+        VIRULENCEFINDER_ONT(lis_ont_inputs)
+        vir_ont_jsons = VIRULENCEFINDER_ONT.out.vir_json.map { _id, f -> f }.collect()
+        VIRULENCE_SUMMARY_ONT(vir_ont_jsons)
+        vir_summary_ch = VIRULENCE_SUMMARY_ONT.out.vir_summary
+    }
+
+    // ---- Route Hybrid assemblies to typing tools ----
+    if (params.kraken_db) {
+        tb_hyb_inputs = hybrid_input.join(kraken_hybrid.kraken_reports)
+                         .filter { _id, _r1, _r2, _ont, rep -> decideOrganism(rep.toString()) == 'mbovis' }
+                         .map    { id, r1, r2, _ont, _rep -> tuple(id, r1, r2) }
+        TB_PROFILER_HYB(tb_hyb_inputs)
+        tb_hyb_mqc = TB_PROFILER_HYB.out.tbprofiler_mqc.map { _id, f -> f }.collect()
+        TB_SUMMARY_HYB(tb_hyb_mqc)
+        tb_summary_ch = TB_SUMMARY_HYB.out.tb_summary
+        
+        if (params.vsnp_ref) {
+            VSNP_HYB(tb_hyb_inputs)
+            vsnp_hyb_tsv = VSNP_HYB.out.vsnp_result.map { _id, f -> f }.collect()
+            VSNP_SUMMARY_HYB(vsnp_hyb_tsv)
+            vsnp_summary_ch = VSNP_SUMMARY_HYB.out.vsnp_summary.collect().flatten()
+        }
+
+        sal_hyb_inputs = hybrid_assemblies.hybrid_contigs.join(kraken_hybrid.kraken_reports)
+                          .filter { _id, _c, rep -> decideOrganism(rep.toString()) == 'salmonella' }
+                          .map    { id, c, _rep -> tuple(id, c) }
+        SISTR2_HYB(sal_hyb_inputs)
+        sistr_hyb_tsv = SISTR2_HYB.out.sistr2_tsv.map { _id, f -> f }.collect()
+        SISTR_SUMMARY_HYB(sistr_hyb_tsv)
+        sistr_summary_ch = SISTR_SUMMARY_HYB.out.sistr_summary
+        
+        AMRFINDER_HYB(sal_hyb_inputs)
+        amr_hyb_reports = AMRFINDER_HYB.out.amr_tsv.map { _id, f -> f }.collect()
+        AMR_SUMMARY_HYB(amr_hyb_reports)
+        amr_summary_ch = AMR_SUMMARY_HYB.out.amr_summary
+
+        lis_hyb_inputs = hybrid_assemblies.hybrid_contigs.join(kraken_hybrid.kraken_reports)
+                          .filter { _id, _c, rep -> decideOrganism(rep.toString()) == 'listeria' }
+                          .map    { id, c, _rep -> tuple(id, c) }
+        MLST_HYB(lis_hyb_inputs)
+        mlst_hyb_tsv = MLST_HYB.out.mlst_tsv.map { _id, f -> f }.collect()
+        MLST_SUMMARY_HYB(mlst_hyb_tsv)
+        mlst_summary_ch = MLST_SUMMARY_HYB.out.mlst_summary
+        
+        VIRULENCEFINDER_HYB(lis_hyb_inputs)
+        vir_hyb_jsons = VIRULENCEFINDER_HYB.out.vir_json.map { _id, f -> f }.collect()
+        VIRULENCE_SUMMARY_HYB(vir_hyb_jsons)
+        vir_summary_ch = VIRULENCE_SUMMARY_HYB.out.vir_summary
+    }
+
+    // ---- Collect QC reports for MultiQC ----
+    fastp_reports = illumina_trimmed.fastp_json.map { _id, f -> f }.collect().ifEmpty([])
+    
+    illumina_quast_reports = illumina_quast_out.quast_reports.map { p -> p }.collect().ifEmpty([])
+    ont_quast_reports      = ont_quast_out.quast_reports.map { p -> p }.collect().ifEmpty([])
+    hybrid_quast_reports   = hybrid_quast_out.quast_reports.map { p -> p }.collect().ifEmpty([])
+    
+    busco_summary_file = BUSCO_SUMMARY.out.busco_summary.collect().flatten().ifEmpty([])
+
+    // ---- Feed everything to MultiQC ----
+    all_reports = metadata_out.metadata_tsv
+        .mix(fastp_reports)
+        .mix(illumina_quast_reports, ont_quast_reports, hybrid_quast_reports)
+        .mix(busco_summary_file)
+        .mix(tb_summary_ch, vsnp_summary_ch, sistr_summary_ch, amr_summary_ch, mlst_summary_ch, vir_summary_ch)
+        .collect()
+    
+    MULTIQC(all_reports, file("${baseDir}/multiqc_config.yaml"))
+    
+    log.info "Metadata-driven pipeline complete."
+}
+
 // ===================== TEST WORKFLOWS =====================
+workflow test_LOAD_METADATA {
+    log.info "=== Testing Metadata CSV Parsing ==="
+    log.info "CSV file: ${params.samples_csv}"
+    
+    if (!file(params.samples_csv).exists()) {
+        log.error "ERROR: CSV file not found: ${params.samples_csv}"
+        System.exit(1)
+    }
+    
+    metadata_out = LOAD_METADATA(file(params.samples_csv))
+    
+    metadata_out.metadata_tsv.view { f ->
+        "=== METADATA TSV ===\n" + f.text
+    }
+    
+    metadata_out.channels_tsv.view { f ->
+        "=== CHANNELS TSV ===\n" + f.text
+    }
+    
+    log.info "=== Metadata test complete ==="
+}
+
 workflow test_SANITY_CHECK {
     raw_pairs = channel.fromFilePairs(params.reads, flat: false)
     SANITY_CHECK(raw_pairs)
@@ -402,28 +704,28 @@ workflow test_KRAKEN2_ROUTING {
     kraken_out.kraken_reports.map { id, rep -> "KRAKEN2: ${id} -> ${rep}" }.view()
 
     routed = assemblies.contigs.join(kraken_out.kraken_reports)
-    routed.map { id, contigs, rep ->
+    routed.map { id, _contigs, rep ->
         def org = decideOrganism(rep.toString())
         "ROUTING: ${id} -> ${org}"
     }.view()
 
     tb_inputs = trimmed.trimmed_reads.join(kraken_out.kraken_reports)
-                 .filter { id, r1, r2, rep -> decideOrganism(rep.toString()) == 'mbovis' }
-                 .map    { id, r1, r2, rep -> tuple(id, r1, r2) }
-    tb_inputs.map { id, r1, r2 -> "TB_PROFILER will run on: ${id}" }.view()
+                 .filter { _id, _r1, _r2, rep -> decideOrganism(rep.toString()) == 'mbovis' }
+                 .map    { id, r1, r2, _rep -> tuple(id, r1, r2) }
+    tb_inputs.map { id, _r1, _r2 -> "TB_PROFILER will run on: ${id}" }.view()
     TB_PROFILER(tb_inputs)
 
     sal_inputs = assemblies.contigs.join(kraken_out.kraken_reports)
-                  .filter { id, c, rep -> decideOrganism(rep.toString()) == 'salmonella' }
-                  .map    { id, c, rep -> tuple(id, c) }
-    sal_inputs.map { id, c -> "SISTR2 + AMRFINDER will run on: ${id}" }.view()
+                  .filter { _id, _c, rep -> decideOrganism(rep.toString()) == 'salmonella' }
+                  .map    { id, c, _rep -> tuple(id, c) }
+    sal_inputs.map { id, _c -> "SISTR2 + AMRFINDER will run on: ${id}" }.view()
     SISTR2(sal_inputs)
     AMRFINDER(sal_inputs)
 
     lis_inputs = assemblies.contigs.join(kraken_out.kraken_reports)
-                  .filter { id, c, rep -> decideOrganism(rep.toString()) == 'listeria' }
-                  .map    { id, c, rep -> tuple(id, c) }
-    lis_inputs.map { id, c -> "MLST + VIRULENCEFINDER will run on: ${id}" }.view()
+                  .filter { _id, _c, rep -> decideOrganism(rep.toString()) == 'listeria' }
+                  .map    { id, c, _rep -> tuple(id, c) }
+    lis_inputs.map { id, _c -> "MLST + VIRULENCEFINDER will run on: ${id}" }.view()
     MLST(lis_inputs)
     VIRULENCEFINDER(lis_inputs)
 }
@@ -434,7 +736,7 @@ workflow test_VIRULENCEFINDER {
     assemblies = SPADES(trimmed.trimmed_reads)
     
     assemblies.contigs
-        .map { it.toString() }
+        .map { val -> val.toString() }
         .view()
     
     VIRULENCEFINDER(assemblies.contigs)
@@ -445,7 +747,7 @@ workflow test_VSNP {
     trimmed = FASTP(raw_pairs)
     
     trimmed.trimmed_reads
-        .map { it.toString() }
+        .map { val -> val.toString() }
         .view()
     
     VSNP(trimmed.trimmed_reads)
