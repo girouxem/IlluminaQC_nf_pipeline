@@ -73,8 +73,15 @@ custom_data:
     section_name: 'Read Length Histograms'
     description: 'Per-sample read length distribution before and after trimming'
     plot_type: 'image'
+  sample_metadata:
+    file_format: 'tsv'
+    section_name: 'Sample Metadata'
+    description: 'Sample information from the metadata CSV'
+    plot_type: 'table'
 
 sp:
+  sample_metadata:
+    fn: 'sample_metadata.csv'
   tbprofiler:
     fn: 'tbprofiler_summary.tsv'
   vsnp_summary:
