@@ -416,7 +416,7 @@ process VSNP {
         find ${sample_id}_step2_out -type f >> vsnp_run_${sample_id}.log 2>/dev/null
 
         # Extract group names from subdirectories (ignore files and temp folders)
-        groups=\$(find ${sample_id}_step2_out -mindepth 1 -maxdepth 1 -type d -printf "%f\\n" 2>/dev/null | grep -v "step2_is_running" | grep -v "all_vcf" | grep -v "vcf_starting_files" | sort -r | tr '\\n' ';')
+        groups=\$(find ${sample_id}_step2_out -mindepth 1 -maxdepth 1 -type d -printf "%f\\n" 2>/dev/null | sort -r | tr '\\n' ';')
         # Remove trailing semicolon
         groups="\${groups%;}"
         
