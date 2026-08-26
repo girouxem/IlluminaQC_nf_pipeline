@@ -427,7 +427,7 @@ workflow metadata_driven {
     ont_polished = MEDAKA(ont_polished_inputs)
     
     ont_quast_out = QUAST_ONT(ont_polished.polished_contigs)
-    _ont_checkm_out = CHECKM_ONT(ont_polished.polished_contigs)
+    ont_checkm_out = CHECKM_ONT(ont_polished.polished_contigs)
 
     // ---- HYBRID BRANCH ----
     hybrid_input = hybrid_samples.map { id, _type, _org, r1, r2, ont -> 
@@ -436,7 +436,7 @@ workflow metadata_driven {
     hybrid_assemblies = UNICYCLER(hybrid_input)
     
     hybrid_quast_out = QUAST_HYB(hybrid_assemblies.hybrid_contigs)
-    _hybrid_checkm_out = CHECKM_HYB(hybrid_assemblies.hybrid_contigs)
+    hybrid_checkm_out = CHECKM_HYB(hybrid_assemblies.hybrid_contigs)
 
     // ---- Kraken2 classification for all assemblies ----
     kraken_illumina = KRAKEN2_ILL(illumina_assemblies.contigs)
@@ -607,11 +607,15 @@ workflow metadata_driven {
     
     busco_summary_file = BUSCO_SUMMARY.out.busco_summary.collect().flatten().ifEmpty([])
 
+    ont_checkm_reports    = ont_checkm_out.checkm_result.map { _id, f -> f }.collect().ifEmpty([])
+    hybrid_checkm_reports = hybrid_checkm_out.checkm_result.map { _id, f -> f }.collect().ifEmpty([])
+
     // ---- Feed everything to MultiQC ----
     all_reports = metadata_out.metadata_tsv
         .mix(fastp_reports)
         .mix(illumina_quast_reports, ont_quast_reports, hybrid_quast_reports)
         .mix(busco_summary_file)
+        .mix(ont_checkm_reports, hybrid_checkm_reports)
         .mix(tb_summary_ch, vsnp_summary_ch, sistr_summary_ch, amr_summary_ch, mlst_summary_ch, vir_summary_ch)
         .collect()
     
