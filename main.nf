@@ -417,10 +417,19 @@ workflow metadata_driven {
     BUSCO_SUMMARY(illumina_busco_collected)
 
     // ---- NANOPORE BRANCH ----
-    ont_input = nanopore_samples.map { id, _type, _org, _r1, _r2, ont -> 
+        // ---- NANOPORE BRANCH ----
+    ont_raw_inputs = nanopore_samples.map { id, _type, _org, _r1, _r2, ont -> 
         tuple(id, file(ont)) 
     }
-    ont_trimmed = PORECHOP(ont_input)
+    
+    // Route raw signal files to Dorado
+    needs_basecalling = ont_raw_inputs.filter { _id, f -> f.name.endsWith('.pod5') || f.name.endsWith('.fast5') }
+    already_basecalled = ont_raw_inputs.filter { _id, f -> f.name.endsWith('.fastq') || f.name.endsWith('.fastq.gz') }
+    
+    basecalled = DORADO(needs_basecalling)
+    all_ont_reads = basecalled.basecalled_fastq.mix(already_basecalled)
+    
+    ont_trimmed = PORECHOP(all_ont_reads)
     ont_assemblies = FLYE(ont_trimmed.trimmed_fastq)
     
     ont_polished_inputs = ont_assemblies.contigs.join(ont_trimmed.trimmed_fastq)
