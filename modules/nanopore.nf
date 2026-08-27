@@ -34,6 +34,8 @@ process DORADO {
         echo "Dorado basecalling failed for ${sample_id}" > ${sample_id}_dorad_failed.txt
         touch ${sample_id}_basecalled.fastq.gz
     fi
+    # Fix permissions so Nextflow can access the files
+    chown -R \$(id -u):\$(id -g) .
     """
 }
 
