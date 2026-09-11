@@ -18,24 +18,19 @@ process DORADO {
     script:
     """
     #!/bin/bash
-    # Dorado basecaller - supports both POD5 and FAST5
-    # Auto-detect format by extension
     INPUT_DIR="${sample_id}_input"
     mkdir -p \$INPUT_DIR
     cp ${raw_signal} \$INPUT_DIR/
 
-    # Run basecaller with duplex mode and 5mC modification
-    dorado basecaller sup,duplex \$INPUT_DIR > ${sample_id}_basecalled.fastq 2> dorado_run.log || true
+    # Use the absolute path to the downloaded Dorado binary
+    ~/dorado/bin/dorado basecaller hac \$INPUT_DIR > ${sample_id}_basecalled.fastq 2> dorado_run.log || true
     
-    # Also try demultiplexing if barcoded
     if [ -s ${sample_id}_basecalled.fastq ]; then
         gzip ${sample_id}_basecalled.fastq
     else
         echo "Dorado basecalling failed for ${sample_id}" > ${sample_id}_dorad_failed.txt
         touch ${sample_id}_basecalled.fastq.gz
     fi
-    # Fix permissions so Nextflow can access the files
-    chown -R \$(id -u):\$(id -g) .
     """
 }
 
